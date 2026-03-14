@@ -4,6 +4,16 @@ Slack notifications plugin for [Paperclip](https://github.com/paperclipai/paperc
 
 Built on the Paperclip plugin SDK and the domain event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)).
 
+## Why this exists
+
+Multiple Paperclip users asked for notifications on the same day the plugin system shipped:
+
+> "is there a way to have codex/claude check paperclip to see when tasks are done without me prompting it?" - Discord #dev
+
+> "basically to have it 'let me know when its done'" - Discord #dev
+
+dotta (maintainer) responded: "we're also adding issue-changed hooks for plugins so when that lands someone could [make notifications]." The event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)) shipped that same day, and dotta asked for "someone to make a plugin that's a totally separate package" to validate the DX. This is that plugin.
+
 ## What it does
 
 - **Issue created** - Posts to Slack when a new issue is created
