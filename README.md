@@ -6,13 +6,17 @@ Built on the Paperclip plugin SDK and the domain event bridge ([PR #909](https:/
 
 ## Why this exists
 
-Multiple Paperclip users asked for notifications on the same day the plugin system shipped:
+Multiple Paperclip users asked for notifications on the same day the plugin system shipped (2026-03-14):
 
-> "is there a way to have codex/claude check paperclip to see when tasks are done without me prompting it?" - Discord #dev
+> "is there a way to have codex/claude check paperclip to see when tasks are done without me prompting it?" - @Choose Liberty, Discord #dev
 
-> "basically to have it 'let me know when its done'" - Discord #dev
+> "basically to have it 'let me know when its done'" - @Choose Liberty, Discord #dev
 
-dotta (maintainer) responded: "we're also adding issue-changed hooks for plugins so when that lands someone could [make notifications]." The event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)) shipped that same day, and dotta asked for "someone to make a plugin that's a totally separate package" to validate the DX. This is that plugin.
+> "can claude code check paperclip to see when tasks are done" - @Nascozz, Discord #dev
+
+@dotta (maintainer) responded: "we're also adding issue-changed hooks for plugins so when that lands someone could [make notifications]." The event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)) shipped that same day. @dotta also asked for "someone to make a plugin that's a totally separate package" to validate the DX. @Ryze said "Really excited by the plugins. I had developed a custom plugin bridge that I will now deprecate and migrate over to the new supported plugin system."
+
+This is that plugin.
 
 ## What it does
 
