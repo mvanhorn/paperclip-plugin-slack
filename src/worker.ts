@@ -210,7 +210,7 @@ export default definePlugin({
       ctx.logger.info("Daily digest job registered (9am daily)");
     }
 
-    ctx.logger.info("Slack notifications plugin started (v0.2.0)");
+    ctx.logger.info("Slack notifications plugin started (v0.1.1)");
   },
 
   async onWebhook(input: PluginWebhookInput): Promise<void> {
