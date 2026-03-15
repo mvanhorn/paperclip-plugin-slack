@@ -29,6 +29,9 @@ const manifest: PaperclipPluginManifestV1 = {
     "secrets.read-ref",
     "webhooks.receive",
     "instance.settings.register",
+    "activity.log.write",
+    "metrics.write",
+    "jobs.schedule",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -63,9 +66,38 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Notify on approval requested",
         default: DEFAULT_CONFIG.notifyOnApprovalCreated,
       },
+      notifyOnAgentError: {
+        type: "boolean",
+        title: "Notify on agent error",
+        default: DEFAULT_CONFIG.notifyOnAgentError,
+      },
+      notifyOnAgentConnected: {
+        type: "boolean",
+        title: "Notify on agent connected/disconnected",
+        default: DEFAULT_CONFIG.notifyOnAgentConnected,
+      },
+      notifyOnBudgetThreshold: {
+        type: "boolean",
+        title: "Notify on budget threshold reached",
+        default: DEFAULT_CONFIG.notifyOnBudgetThreshold,
+      },
+      enableDailyDigest: {
+        type: "boolean",
+        title: "Send daily activity digest",
+        description: "Posts a summary of all agent activity, costs, and completed tasks once per day.",
+        default: DEFAULT_CONFIG.enableDailyDigest,
+      },
     },
     required: ["slackTokenRef", "defaultChannelId"],
   },
+  jobs: [
+    {
+      jobKey: "daily-digest",
+      displayName: "Daily Activity Digest",
+      description: "Posts a summary of agent activity, costs, and completed tasks to Slack.",
+      schedule: "0 9 * * *",
+    },
+  ],
   webhooks: [
     {
       endpointKey: WEBHOOK_KEYS.slackEvents,

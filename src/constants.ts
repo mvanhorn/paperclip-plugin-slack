@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-slack";
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.2.0";
 
 export const WEBHOOK_KEYS = {
   slackEvents: "slack-events",
@@ -20,4 +20,8 @@ export const DEFAULT_CONFIG = {
   notifyOnIssueCreated: true,
   notifyOnIssueDone: true,
   notifyOnApprovalCreated: true,
+  notifyOnAgentError: true,
+  notifyOnAgentConnected: true,
+  notifyOnBudgetThreshold: true,
+  enableDailyDigest: false,
 } as const;
