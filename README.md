@@ -1,6 +1,6 @@
 # paperclip-plugin-slack
 
-Slack notifications plugin for [Paperclip](https://github.com/paperclipai/paperclip). Posts to Slack when issues are created, completed, or need approval.
+Slack notifications plugin for [Paperclip](https://github.com/paperclipai/paperclip). Posts to Slack when agents create issues, complete tasks, request approvals, hit errors, or reach budget limits. Includes daily activity digests and slash commands.
 
 Built on the Paperclip plugin SDK and the domain event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)).
 
@@ -20,11 +20,22 @@ This is that plugin.
 
 ## What it does
 
-- **Issue created** - Posts to Slack when a new issue is created
-- **Issue done** - Posts to Slack when an issue status changes to "done"
-- **Approval requested** - Posts to Slack when a new approval is created
-- **Per-company channel mapping** - Different companies can post to different Slack channels
-- **Webhook endpoints** - Receives Slack Events API and slash command payloads
+**Notifications**
+- **Issue created** - Posts when a new issue is created
+- **Issue done** - Posts when an issue status changes to "done"
+- **Approval requested** - Posts when a new approval is created
+- **Agent error** - Posts when an agent run fails
+- **Agent online** - Posts when an agent connects
+- **Budget threshold** - Alerts at 80%, 90%, and 100% budget usage (deduped per threshold)
+- **Onboarding milestone** - Celebrates an agent's first successful run
+
+**Daily digest**
+- Scheduled job (9am daily) summarizing tasks completed, tasks created, active agents, total cost, and top performer
+
+**Slash commands**
+- `/clip status` - Show agent and task status
+- `/clip help` - List available commands
+- Per-company channel mapping - different companies can post to different Slack channels
 
 ## Setup
 
@@ -43,10 +54,10 @@ This is that plugin.
 | `notifyOnIssueCreated` | Post when issues are created (default: true) |
 | `notifyOnIssueDone` | Post when issues are completed (default: true) |
 | `notifyOnApprovalCreated` | Post when approvals are requested (default: true) |
-
-## v1 limitations
-
-Agent run events (`agent.run.finished`, `agent.run.failed`) are not yet bridged to the plugin event bus. These go through `publishLiveEvent` in the Paperclip server, not `logActivity`. A future Paperclip PR can bridge those the same way #909 bridged issue events.
+| `notifyOnAgentError` | Post when agent runs fail (default: true) |
+| `notifyOnAgentConnected` | Post when agents connect/disconnect (default: true) |
+| `notifyOnBudgetThreshold` | Post when agents hit budget limits (default: true) |
+| `enableDailyDigest` | Send daily activity summary at 9am (default: false) |
 
 ## Development
 
@@ -57,3 +68,7 @@ npm run build
 ```
 
 Requires `@paperclipai/plugin-sdk` and `@paperclipai/shared` as peer dependencies. For local development, link them from the Paperclip monorepo.
+
+## License
+
+MIT
