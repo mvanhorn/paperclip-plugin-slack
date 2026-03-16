@@ -1,6 +1,6 @@
 # paperclip-plugin-slack
 
-Slack notifications plugin for [Paperclip](https://github.com/paperclipai/paperclip). Posts to Slack when agents create issues, complete tasks, request approvals, hit errors, or reach budget limits. Includes daily activity digests and slash commands.
+Slack notifications plugin for [Paperclip](https://github.com/paperclipai/paperclip). Posts to Slack when agents create issues, complete tasks, request approvals, hit errors, or reach budget limits. Approve or reject requests directly from Slack with interactive buttons. Includes daily activity digests and per-type channel routing.
 
 Built on the Paperclip plugin SDK and the domain event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)).
 
@@ -20,30 +20,42 @@ This is that plugin.
 
 ## What it does
 
-**Notifications**
-- **Issue created** - Posts when a new issue is created
-- **Issue done** - Posts when an issue status changes to "done"
-- **Approval requested** - Posts when a new approval is created
-- **Agent error** - Posts when an agent run fails
-- **Agent online** - Posts when an agent connects
+**Notifications (rich Block Kit formatting)**
+- **Issue created** - Title, description snippet, status, priority, assignee, project fields, and a "View Issue" button
+- **Issue done** - Completion confirmation with status fields and view button
+- **Approval requested** - Interactive **Approve**, **Reject**, and **View** buttons. Click to act without leaving Slack.
+- **Agent error** - Error message in a code block with warning indicator
+- **Agent online** - Connection confirmation with check mark
 - **Budget threshold** - Alerts at 80%, 90%, and 100% budget usage (deduped per threshold)
 - **Onboarding milestone** - Celebrates an agent's first successful run
 
+**Interactive approvals**
+- Approve/reject buttons on every approval notification
+- Clicking a button calls the Paperclip API and updates the Slack message inline
+- Identifies which Slack user acted (logged as `slack:{user_id}`)
+
+**Per-type channel routing**
+- Route approvals, errors, and pipeline events to separate Slack channels
+- Falls back to the default channel when a per-type channel isn't configured
+- Per-company overrides still take priority
+
 **Daily digest**
-- Scheduled job (9am daily) summarizing tasks completed, tasks created, active agents, total cost, and top performer
+- Scheduled job (9am daily) with real stats from the Paperclip API
+- Tasks completed, tasks created, active agents, total cost, and top performer
+- Cost data accumulated from `cost_event.created` events throughout the day
 
 **Slash commands**
 - `/clip status` - Show agent and task status
 - `/clip help` - List available commands
-- Per-company channel mapping - different companies can post to different Slack channels
 
 ## Setup
 
 1. Create a Slack app at https://api.slack.com/apps
 2. Add the `chat:write` bot scope
-3. Install the app to your workspace and copy the Bot OAuth Token
-4. Store the token in your Paperclip secret provider
-5. Install the plugin and configure the secret reference + channel ID
+3. Enable **Interactivity** and point the Request URL to your Paperclip host's `slack-interactivity` webhook endpoint
+4. Install the app to your workspace and copy the Bot OAuth Token
+5. Store the token in your Paperclip secret provider
+6. Install the plugin and configure the secret reference + channel ID
 
 ## Configuration
 
@@ -51,6 +63,9 @@ This is that plugin.
 |---------|-------------|
 | `slackTokenRef` | Secret reference for the Slack Bot OAuth token |
 | `defaultChannelId` | Default Slack channel ID (e.g. `C01ABC2DEF3`) |
+| `approvalsChannelId` | Dedicated channel for approvals (optional) |
+| `errorsChannelId` | Dedicated channel for agent errors (optional) |
+| `pipelineChannelId` | Dedicated channel for agent lifecycle events (optional) |
 | `notifyOnIssueCreated` | Post when issues are created (default: true) |
 | `notifyOnIssueDone` | Post when issues are completed (default: true) |
 | `notifyOnApprovalCreated` | Post when approvals are requested (default: true) |
@@ -64,6 +79,7 @@ This is that plugin.
 ```bash
 npm install
 npm run typecheck
+npm test
 npm run build
 ```
 
