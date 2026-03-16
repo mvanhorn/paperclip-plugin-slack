@@ -3,57 +3,183 @@ import type { SlackMessage } from "./slack-api.js";
 
 type Payload = Record<string, unknown>;
 
+const DASHBOARD_BASE = "http://localhost:3100";
+
+function contextFooter(timestamp?: string): Record<string, unknown> {
+  const elements: Array<Record<string, unknown>> = [
+    { type: "mrkdwn", text: "Paperclip" },
+  ];
+  if (timestamp) {
+    elements.push({ type: "mrkdwn", text: `<!date^${Math.floor(new Date(timestamp).getTime() / 1000)}^{date_short_pretty} at {time}|${timestamp}>` });
+  }
+  return { type: "context", elements };
+}
+
+function viewButton(label: string, url: string): Record<string, unknown> {
+  return {
+    type: "button",
+    text: { type: "plain_text", text: label },
+    url,
+  };
+}
+
 export function formatIssueCreated(event: PluginEvent): SlackMessage {
   const p = event.payload as Payload;
   const identifier = String(p.identifier ?? event.entityId);
   const title = String(p.title ?? "Untitled");
+  const description = p.description ? String(p.description).slice(0, 300) : null;
+  const status = p.status ? String(p.status) : null;
+  const priority = p.priority ? String(p.priority) : null;
+  const assigneeName = p.assigneeName ? String(p.assigneeName) : null;
+  const projectName = p.projectName ? String(p.projectName) : null;
+
+  const fields: Array<{ type: string; text: string }> = [];
+  if (status) fields.push({ type: "mrkdwn", text: `*Status*\n\`${status}\`` });
+  if (priority) fields.push({ type: "mrkdwn", text: `*Priority*\n\`${priority}\`` });
+  if (assigneeName) fields.push({ type: "mrkdwn", text: `*Assignee*\n${assigneeName}` });
+  if (projectName) fields.push({ type: "mrkdwn", text: `*Project*\n${projectName}` });
+
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: description
+          ? `*New issue created*\n*${identifier}* ${title}\n> ${description}`
+          : `*New issue created*\n*${identifier}* ${title}`,
+      },
+      accessory: viewButton("View Issue", `${DASHBOARD_BASE}/issues/${event.entityId}`),
+    },
+  ];
+
+  if (fields.length > 0) {
+    blocks.push({ type: "section", fields });
+  }
+
+  blocks.push(contextFooter(event.occurredAt));
 
   return {
     text: `New issue: ${identifier} - ${title}`,
-    blocks: [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*New issue created*\n*${identifier}* ${title}`,
-        },
-      },
-    ],
+    blocks,
   };
 }
 
 export function formatIssueDone(event: PluginEvent): SlackMessage {
   const p = event.payload as Payload;
   const identifier = String(p.identifier ?? event.entityId);
+  const title = String(p.title ?? "");
+
+  const fields: Array<{ type: string; text: string }> = [];
+  if (p.status) fields.push({ type: "mrkdwn", text: `*Status*\n\`${String(p.status)}\`` });
+  if (p.priority) fields.push({ type: "mrkdwn", text: `*Priority*\n\`${String(p.priority)}\`` });
+
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Issue completed* :white_check_mark:\n*${identifier}* ${title} is now done.`,
+      },
+      accessory: viewButton("View Issue", `${DASHBOARD_BASE}/issues/${event.entityId}`),
+    },
+  ];
+
+  if (fields.length > 0) {
+    blocks.push({ type: "section", fields });
+  }
+
+  blocks.push(contextFooter(event.occurredAt));
 
   return {
     text: `Issue done: ${identifier}`,
-    blocks: [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*Issue completed*\n*${identifier}* is now done.`,
-        },
-      },
-    ],
+    blocks,
   };
 }
 
 export function formatApprovalCreated(event: PluginEvent): SlackMessage {
   const p = event.payload as Payload;
   const approvalType = String(p.type ?? "unknown");
+  const approvalId = String(p.approvalId ?? event.entityId);
+  const title = String(p.title ?? "");
+  const description = p.description ? String(p.description) : null;
+  const agentName = p.agentName ? String(p.agentName) : null;
   const issueIds = Array.isArray(p.issueIds) ? p.issueIds : [];
+
+  const fields: Array<{ type: string; text: string }> = [];
+  if (agentName) fields.push({ type: "mrkdwn", text: `*Agent*\n${agentName}` });
+  fields.push({ type: "mrkdwn", text: `*Type*\n\`${approvalType}\`` });
+  if (issueIds.length > 0) {
+    fields.push({ type: "mrkdwn", text: `*Linked Issues*\n${issueIds.join(", ")}` });
+  }
+
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: description
+          ? `*Approval requested* :rotating_light:\n${title ? `*${title}*\n` : ""}${description}`
+          : `*Approval requested* :rotating_light:${title ? `\n*${title}*` : ""}`,
+      },
+    },
+  ];
+
+  if (fields.length > 0) {
+    blocks.push({ type: "section", fields });
+  }
+
+  blocks.push({
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Approve" },
+        style: "primary",
+        action_id: "approval_approve",
+        value: approvalId,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Reject" },
+        style: "danger",
+        action_id: "approval_reject",
+        value: approvalId,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "View" },
+        url: `${DASHBOARD_BASE}/approvals/${approvalId}`,
+        action_id: "approval_view",
+      },
+    ],
+  });
+
+  blocks.push(contextFooter(event.occurredAt));
 
   return {
     text: `Approval needed (${approvalType}) for ${issueIds.length} issue(s)`,
+    blocks,
+  };
+}
+
+export function formatApprovalResolved(
+  approvalId: string,
+  approved: boolean,
+  userId: string,
+): SlackMessage {
+  const action = approved ? "Approved" : "Rejected";
+  const emoji = approved ? ":white_check_mark:" : ":x:";
+
+  return {
+    text: `${action} by ${userId}`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Approval requested*\nType: ${approvalType}\nIssues: ${issueIds.length}`,
+          text: `${emoji} *${action}* by <@${userId}>`,
         },
+        accessory: viewButton("View", `${DASHBOARD_BASE}/approvals/${approvalId}`),
       },
     ],
   };
@@ -74,6 +200,7 @@ export function formatAgentError(event: PluginEvent): SlackMessage {
           text: `*Agent error* :warning:\n*${agentName}* encountered an error:\n\`\`\`${errorMessage.slice(0, 500)}\`\`\``,
         },
       },
+      contextFooter(event.occurredAt),
     ],
   };
 }
@@ -92,6 +219,7 @@ export function formatAgentConnected(event: PluginEvent): SlackMessage {
           text: `*Agent online* :white_check_mark:\n*${agentName}* is now connected and ready.`,
         },
       },
+      contextFooter(event.occurredAt),
     ],
   };
 }
@@ -110,9 +238,10 @@ export function formatBudgetThreshold(event: PluginEvent): SlackMessage {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Budget threshold reached* :money_with_wings:\n*${agentName}* has used *${pct}%* of budget ($${spent} / $${budget})`,
+          text: `*Budget threshold reached* :chart_with_upwards_trend:\n*${agentName}* has used *${pct}%* of budget ($${spent} / $${budget})`,
         },
       },
+      contextFooter(event.occurredAt),
     ],
   };
 }
@@ -132,6 +261,7 @@ export function formatOnboardingMilestone(event: PluginEvent): SlackMessage {
           text: `*Onboarding milestone* :tada:\n*${agentName}* achieved: ${milestone}`,
         },
       },
+      contextFooter(event.occurredAt),
     ],
   };
 }
@@ -147,11 +277,8 @@ export function formatDailyDigest(stats: {
     text: `Daily digest: ${stats.tasksCompleted} tasks completed, $${stats.totalCost} spent`,
     blocks: [
       {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*Daily Activity Digest* :clipboard:`,
-        },
+        type: "header",
+        text: { type: "plain_text", text: "Daily Activity Digest" },
       },
       {
         type: "section",
@@ -173,6 +300,11 @@ export function formatDailyDigest(stats: {
             },
           ]
         : []),
+      { type: "divider" },
+      {
+        type: "context",
+        elements: [{ type: "mrkdwn", text: "Paperclip - Daily Digest" }],
+      },
     ],
   };
 }

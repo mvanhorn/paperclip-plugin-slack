@@ -1,9 +1,10 @@
 export const PLUGIN_ID = "paperclip-plugin-slack";
-export const PLUGIN_VERSION = "0.1.1";
+export const PLUGIN_VERSION = "0.2.0";
 
 export const WEBHOOK_KEYS = {
   slackEvents: "slack-events",
   slashCommand: "slash-command",
+  interactivity: "slack-interactivity",
 } as const;
 
 export const SLOT_IDS = {
@@ -17,6 +18,9 @@ export const EXPORT_NAMES = {
 export const DEFAULT_CONFIG = {
   slackTokenRef: "",
   defaultChannelId: "",
+  approvalsChannelId: "",
+  errorsChannelId: "",
+  pipelineChannelId: "",
   notifyOnIssueCreated: true,
   notifyOnIssueDone: true,
   notifyOnApprovalCreated: true,

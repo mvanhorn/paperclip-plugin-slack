@@ -51,6 +51,24 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Channel ID to post notifications to (e.g. C01ABC2DEF3).",
         default: DEFAULT_CONFIG.defaultChannelId,
       },
+      approvalsChannelId: {
+        type: "string",
+        title: "Approvals Channel ID",
+        description: "Dedicated channel for approval notifications (optional, falls back to default).",
+        default: DEFAULT_CONFIG.approvalsChannelId,
+      },
+      errorsChannelId: {
+        type: "string",
+        title: "Errors Channel ID",
+        description: "Dedicated channel for agent error notifications (optional, falls back to default).",
+        default: DEFAULT_CONFIG.errorsChannelId,
+      },
+      pipelineChannelId: {
+        type: "string",
+        title: "Pipeline Channel ID",
+        description: "Dedicated channel for agent lifecycle events (optional, falls back to default).",
+        default: DEFAULT_CONFIG.pipelineChannelId,
+      },
       notifyOnIssueCreated: {
         type: "boolean",
         title: "Notify on issue created",
@@ -108,6 +126,11 @@ const manifest: PaperclipPluginManifestV1 = {
       endpointKey: WEBHOOK_KEYS.slashCommand,
       displayName: "Slack Slash Command",
       description: "Receives /clip slash commands from Slack.",
+    },
+    {
+      endpointKey: WEBHOOK_KEYS.interactivity,
+      displayName: "Slack Interactivity",
+      description: "Receives button click payloads from interactive messages (approve/reject).",
     },
   ],
   ui: {
