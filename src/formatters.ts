@@ -3,7 +3,11 @@ import type { SlackMessage } from "./slack-api.js";
 
 type Payload = Record<string, unknown>;
 
-const DASHBOARD_BASE = "http://localhost:3100";
+let dashboardBase = "http://localhost:3100";
+
+export function setBaseUrl(url: string) {
+  dashboardBase = url.replace(/\/+$/, "");
+}
 
 function contextFooter(timestamp?: string): Record<string, unknown> {
   const elements: Array<Record<string, unknown>> = [
@@ -48,7 +52,7 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
           ? `*New issue created*\n*${identifier}* ${title}\n> ${description}`
           : `*New issue created*\n*${identifier}* ${title}`,
       },
-      accessory: viewButton("View Issue", `${DASHBOARD_BASE}/issues/${event.entityId}`),
+      accessory: viewButton("View Issue", `${dashboardBase}/issues/${event.entityId}`),
     },
   ];
 
@@ -80,7 +84,7 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
         type: "mrkdwn",
         text: `*Issue completed* :white_check_mark:\n*${identifier}* ${title} is now done.`,
       },
-      accessory: viewButton("View Issue", `${DASHBOARD_BASE}/issues/${event.entityId}`),
+      accessory: viewButton("View Issue", `${dashboardBase}/issues/${event.entityId}`),
     },
   ];
 
@@ -148,7 +152,7 @@ export function formatApprovalCreated(event: PluginEvent): SlackMessage {
       {
         type: "button",
         text: { type: "plain_text", text: "View" },
-        url: `${DASHBOARD_BASE}/approvals/${approvalId}`,
+        url: `${dashboardBase}/approvals/${approvalId}`,
         action_id: "approval_view",
       },
     ],
@@ -179,7 +183,7 @@ export function formatApprovalResolved(
           type: "mrkdwn",
           text: `${emoji} *${action}* by <@${userId}>`,
         },
-        accessory: viewButton("View", `${DASHBOARD_BASE}/approvals/${approvalId}`),
+        accessory: viewButton("View", `${dashboardBase}/approvals/${approvalId}`),
       },
     ],
   };

@@ -105,6 +105,12 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Posts a summary of all agent activity, costs, and completed tasks once per day.",
         default: DEFAULT_CONFIG.enableDailyDigest,
       },
+      paperclipBaseUrl: {
+        type: "string",
+        title: "Paperclip Base URL",
+        description: "Base URL of your Paperclip instance for dashboard links.",
+        default: DEFAULT_CONFIG.paperclipBaseUrl,
+      },
     },
     required: ["slackTokenRef", "defaultChannelId"],
   },

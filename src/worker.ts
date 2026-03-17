@@ -6,9 +6,10 @@ import {
   type PluginHealthDiagnostics,
 } from "@paperclipai/plugin-sdk";
 import { WEBHOOK_KEYS } from "./constants.js";
-import { postMessage, respondToAction } from "./slack-api.js";
+import { postMessage, respondToAction, respondEphemeral } from "./slack-api.js";
 import type { SlackMessage } from "./slack-api.js";
 import {
+  setBaseUrl,
   formatIssueCreated,
   formatIssueDone,
   formatApprovalCreated,
@@ -33,7 +34,12 @@ type SlackConfig = {
   notifyOnAgentConnected: boolean;
   notifyOnBudgetThreshold: boolean;
   enableDailyDigest: boolean;
+  paperclipBaseUrl: string;
 };
+
+let pluginCtx: PluginContext;
+let pluginToken: string;
+let pluginConfig: SlackConfig;
 
 async function resolveChannel(
   ctx: PluginContext,
@@ -48,13 +54,219 @@ async function resolveChannel(
   return (override as string) ?? fallback ?? null;
 }
 
-function parseSlashCommand(rawBody: string): { command: string; text: string; responseUrl: string } {
+function parseSlashCommand(rawBody: string): { command: string; text: string; responseUrl: string; userId: string; channelId: string } {
   const params = new URLSearchParams(rawBody);
   return {
     command: params.get("command") ?? "",
     text: params.get("text") ?? "",
     responseUrl: params.get("response_url") ?? "",
+    userId: params.get("user_id") ?? "",
+    channelId: params.get("channel_id") ?? "",
   };
+}
+
+function statusBadge(status: string): string {
+  const badges: Record<string, string> = {
+    active: ":large_green_circle:",
+    running: ":large_green_circle:",
+    idle: ":white_circle:",
+    paused: ":double_vertical_bar:",
+    error: ":red_circle:",
+    pending_approval: ":hourglass:",
+    terminated: ":black_circle:",
+  };
+  return badges[status] ?? ":white_circle:";
+}
+
+async function handleSlashCommand(ctx: PluginContext, rawBody: string): Promise<void> {
+  const { text, responseUrl } = parseSlashCommand(rawBody);
+  const parts = text.trim().split(/\s+/);
+  const subcommand = parts[0]?.toLowerCase() ?? "";
+  const arg = parts[1]?.toLowerCase() ?? "";
+
+  const companies = await ctx.companies.list({ limit: 1, offset: 0 });
+  const companyId = companies[0]?.id ?? "";
+
+  try {
+    switch (subcommand) {
+      case "status":
+        await handleStatusCommand(ctx, companyId, responseUrl);
+        break;
+      case "help":
+      case "":
+        await handleHelpCommand(ctx, responseUrl);
+        break;
+      case "agents":
+        await handleAgentsCommand(ctx, companyId, responseUrl);
+        break;
+      case "issues":
+        await handleIssuesCommand(ctx, companyId, responseUrl, arg);
+        break;
+      case "approve":
+        await handleApproveCommand(ctx, responseUrl, arg);
+        break;
+      default:
+        await respondEphemeral(ctx, responseUrl, {
+          text: `Unknown command: \`${subcommand}\`. Use \`/clip help\` to see available commands.`,
+        });
+    }
+    await ctx.metrics.write("slack.commands.handled", 1, { command_name: subcommand || "help" });
+  } catch (err) {
+    ctx.logger.warn("Slash command failed", { subcommand, err });
+    await respondEphemeral(ctx, responseUrl, {
+      text: "Something went wrong processing your command. Please try again.",
+    });
+  }
+}
+
+async function handleStatusCommand(ctx: PluginContext, companyId: string, responseUrl: string): Promise<void> {
+  const agents = await ctx.agents.list({ companyId, limit: 100, offset: 0 });
+  const activeAgents = agents.filter((a) => a.status === "active" || a.status === "running");
+  const recentDone = await ctx.issues.list({ companyId, status: "done", limit: 5, offset: 0 });
+
+  const agentSummary = activeAgents.length > 0
+    ? activeAgents.map((a) => `${statusBadge(a.status)} ${a.name}`).join("\n")
+    : "_No active agents_";
+
+  const issueSummary = recentDone.length > 0
+    ? recentDone.map((i) => `:white_check_mark: ${i.title}`).join("\n")
+    : "_No recent completions_";
+
+  await respondEphemeral(ctx, responseUrl, {
+    text: `Status: ${activeAgents.length} active agents, ${recentDone.length} recent completions`,
+    blocks: [
+      {
+        type: "header",
+        text: { type: "plain_text", text: "Paperclip Status" },
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*Active Agents (${activeAgents.length})*\n${agentSummary}` },
+          { type: "mrkdwn", text: `*Recent Completions*\n${issueSummary}` },
+        ],
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "View Dashboard" },
+            url: pluginConfig.paperclipBaseUrl,
+            action_id: "view_dashboard",
+          },
+        ],
+      },
+    ],
+  });
+}
+
+async function handleHelpCommand(ctx: PluginContext, responseUrl: string): Promise<void> {
+  await respondEphemeral(ctx, responseUrl, {
+    text: "Available /clip commands",
+    blocks: [
+      {
+        type: "header",
+        text: { type: "plain_text", text: "Paperclip Slash Commands" },
+      },
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: [
+            "`/clip status` - Show active agents and recent completions",
+            "`/clip agents` - List all agents with status badges",
+            "`/clip issues [open|done]` - List issues filtered by status",
+            "`/clip approve <id>` - Approve a pending approval",
+            "`/clip help` - Show this help message",
+          ].join("\n"),
+        },
+      },
+      {
+        type: "context",
+        elements: [
+          { type: "mrkdwn", text: `<${pluginConfig.paperclipBaseUrl}|Open Paperclip Dashboard>` },
+        ],
+      },
+    ],
+  });
+}
+
+async function handleAgentsCommand(ctx: PluginContext, companyId: string, responseUrl: string): Promise<void> {
+  const agents = await ctx.agents.list({ companyId, limit: 100, offset: 0 });
+
+  if (agents.length === 0) {
+    await respondEphemeral(ctx, responseUrl, { text: "No agents found." });
+    return;
+  }
+
+  const lines = agents.map((a) => `${statusBadge(a.status)} *${a.name}* - \`${a.status}\``);
+
+  await respondEphemeral(ctx, responseUrl, {
+    text: `${agents.length} agents`,
+    blocks: [
+      {
+        type: "header",
+        text: { type: "plain_text", text: `Agents (${agents.length})` },
+      },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: lines.join("\n") },
+      },
+    ],
+  });
+}
+
+async function handleIssuesCommand(ctx: PluginContext, companyId: string, responseUrl: string, filter: string): Promise<void> {
+  const status = filter === "done" ? "done" as const : filter === "open" ? "todo" as const : undefined;
+  const issues = await ctx.issues.list({ companyId, status, limit: 10, offset: 0 });
+
+  if (issues.length === 0) {
+    await respondEphemeral(ctx, responseUrl, { text: `No ${status ?? ""} issues found.` });
+    return;
+  }
+
+  const lines = issues.map((i) => {
+    const badge = i.status === "done" ? ":white_check_mark:" : ":blue_book:";
+    return `${badge} *${i.title}* - \`${i.status}\``;
+  });
+
+  await respondEphemeral(ctx, responseUrl, {
+    text: `${issues.length} issues`,
+    blocks: [
+      {
+        type: "header",
+        text: { type: "plain_text", text: `Issues${status ? ` (${status})` : ""} - showing ${issues.length}` },
+      },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: lines.join("\n") },
+      },
+    ],
+  });
+}
+
+async function handleApproveCommand(ctx: PluginContext, responseUrl: string, approvalId: string): Promise<void> {
+  if (!approvalId) {
+    await respondEphemeral(ctx, responseUrl, { text: "Usage: `/clip approve <approval-id>`" });
+    return;
+  }
+
+  try {
+    await ctx.http.fetch(
+      `${pluginConfig.paperclipBaseUrl}/api/approvals/${approvalId}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decidedByUserId: "slack:command" }),
+      },
+    );
+    await respondEphemeral(ctx, responseUrl, { text: `:white_check_mark: Approval \`${approvalId}\` approved.` });
+    await ctx.metrics.write("slack.approvals.decided", 1, { decision: "approve" });
+  } catch (err) {
+    ctx.logger.warn("Approve command failed", { approvalId, err });
+    await respondEphemeral(ctx, responseUrl, { text: `:x: Failed to approve \`${approvalId}\`. Check the ID and try again.` });
+  }
 }
 
 export default definePlugin({
@@ -62,23 +274,32 @@ export default definePlugin({
     const rawConfig = await ctx.config.get();
     const config = rawConfig as unknown as SlackConfig;
 
+    pluginCtx = ctx;
+    pluginConfig = config;
+
+    if (config.paperclipBaseUrl) {
+      setBaseUrl(config.paperclipBaseUrl);
+    }
+
     if (!config.slackTokenRef) {
       ctx.logger.warn("No slackTokenRef configured, notifications disabled");
       return;
     }
 
     const token = await ctx.secrets.resolve(config.slackTokenRef);
+    pluginToken = token;
 
-    // --- Notification helper (supports per-type channel override) ---
+    // --- Notification helper (supports per-type channel override + threading) ---
     const notify = async (
       event: PluginEvent,
       formatter: (e: PluginEvent) => SlackMessage,
       overrideChannelId?: string,
+      opts?: { threadTs?: string },
     ) => {
       const fallback = overrideChannelId || config.defaultChannelId;
       const channelId = await resolveChannel(ctx, event.companyId, fallback);
       if (!channelId) return;
-      const result = await postMessage(ctx, token, channelId, formatter(event));
+      const result = await postMessage(ctx, token, channelId, formatter(event), opts);
       if (result.ok) {
         await ctx.activity.log({
           companyId: event.companyId,
@@ -86,35 +307,50 @@ export default definePlugin({
           entityType: "plugin",
           entityId: event.entityId,
         });
+        await ctx.metrics.write("slack.notifications.sent", 1, { event_type: event.eventType });
+      } else {
+        await ctx.metrics.write("slack.notifications.failed", 1, { event_type: event.eventType, error_code: result.error ?? "unknown" });
       }
+      return result;
     };
 
     // --- Core event subscriptions ---
 
     if (config.notifyOnIssueCreated) {
-      ctx.events.on("issue.created", (event: PluginEvent) =>
-        notify(event, formatIssueCreated),
-      );
+      ctx.events.on("issue.created", async (event: PluginEvent) => {
+        const result = await notify(event, formatIssueCreated);
+        if (result?.ok && result.ts) {
+          await ctx.state.set(
+            { scopeKind: "company", scopeId: event.companyId, stateKey: `thread-issue-${event.entityId}` },
+            result.ts,
+          );
+        }
+      });
     }
 
     if (config.notifyOnIssueDone) {
       ctx.events.on("issue.updated", async (event: PluginEvent) => {
         const payload = event.payload as Record<string, unknown>;
         if (payload.status !== "done") return;
-        await notify(event, formatIssueDone);
+        const threadTs = await ctx.state.get({
+          scopeKind: "company",
+          scopeId: event.companyId,
+          stateKey: `thread-issue-${event.entityId}`,
+        }) as string | null;
+        await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
       });
     }
 
     if (config.notifyOnApprovalCreated) {
-      ctx.events.on("approval.created", (event: PluginEvent) =>
-        notify(event, formatApprovalCreated, config.approvalsChannelId),
-      );
+      ctx.events.on("approval.created", async (event: PluginEvent) => {
+        await notify(event, formatApprovalCreated, config.approvalsChannelId);
+      });
     }
 
     if (config.notifyOnAgentError) {
-      ctx.events.on("agent.run.failed", (event: PluginEvent) =>
-        notify(event, formatAgentError, config.errorsChannelId),
-      );
+      ctx.events.on("agent.run.failed", async (event: PluginEvent) => {
+        await notify(event, formatAgentError, config.errorsChannelId);
+      });
     }
 
     if (config.notifyOnAgentConnected) {
@@ -167,6 +403,7 @@ export default definePlugin({
           true,
         );
         await notify(event, formatBudgetThreshold, config.pipelineChannelId);
+        await ctx.metrics.write("slack.budget_alerts.sent", 1, { threshold: String(bucket) });
       });
     }
 
@@ -217,11 +454,9 @@ export default definePlugin({
 
           const agents = await ctx.agents.list({ companyId: company.id, limit: 100, offset: 0 });
           const agentsActive = agents.filter((a) =>
-            (a as unknown as Record<string, unknown>).status === "active" ||
-            (a as unknown as Record<string, unknown>).status === "online"
+            a.status === "active" || a.status === "running"
           ).length;
 
-          // Cost tracking: read accumulated daily cost from state
           const dateKey = now.toISOString().slice(0, 10);
           const dailyCost = await ctx.state.get({
             scopeKind: "company",
@@ -251,8 +486,22 @@ export default definePlugin({
             totalCost,
             topAgent,
           }));
+
+          // Clean up previous day's cost state
+          const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+          await ctx.state.delete({
+            scopeKind: "company",
+            scopeId: company.id,
+            stateKey: `daily-cost-${yesterday}`,
+          });
+          await ctx.state.delete({
+            scopeKind: "company",
+            scopeId: company.id,
+            stateKey: `daily-agent-costs-${yesterday}`,
+          });
         }
         ctx.logger.info("Daily digest posted to Slack");
+        await ctx.metrics.write("slack.digest.sent", 1);
       });
 
       // Accumulate costs from cost events for daily digest
@@ -289,7 +538,7 @@ export default definePlugin({
       ctx.logger.info("Daily digest job registered (9am daily)");
     }
 
-    ctx.logger.info("Slack notifications plugin started (v0.2.0)");
+    ctx.logger.info("Slack notifications plugin started (v1.0.0)");
   },
 
   async onWebhook(input: PluginWebhookInput): Promise<void> {
@@ -302,8 +551,8 @@ export default definePlugin({
     }
 
     if (input.endpointKey === WEBHOOK_KEYS.slashCommand) {
-      const { text } = parseSlashCommand(input.rawBody);
-      const _subcommand = text.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+      await handleSlashCommand(pluginCtx, input.rawBody);
+      return;
     }
 
     // Handle interactive button clicks (approve/reject)
@@ -326,7 +575,6 @@ export default definePlugin({
 
       if (!approvalId) return;
 
-      const ctx = input as unknown as PluginContext;
       let approved: boolean;
       if (actionId === "approval_approve") {
         approved = true;
@@ -338,12 +586,8 @@ export default definePlugin({
 
       const endpoint = approved ? "approve" : "reject";
       try {
-        const rawConfig = await (input as unknown as { config: { get(): Promise<unknown> } }).config.get();
-        const config = rawConfig as unknown as SlackConfig;
-        const token = await (input as unknown as { secrets: { resolve(ref: string): Promise<string> } }).secrets.resolve(config.slackTokenRef);
-
-        await (input as unknown as { http: { fetch(url: string, init: RequestInit): Promise<Response> } }).http.fetch(
-          `http://localhost:3100/api/approvals/${approvalId}/${endpoint}`,
+        await pluginCtx.http.fetch(
+          `${pluginConfig.paperclipBaseUrl}/api/approvals/${approvalId}/${endpoint}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -352,13 +596,14 @@ export default definePlugin({
         );
 
         await respondToAction(
-          input as unknown as PluginContext,
-          token,
+          pluginCtx,
+          pluginToken,
           responseUrl,
           formatApprovalResolved(approvalId, approved, userId),
         );
+        await pluginCtx.metrics.write("slack.approvals.decided", 1, { decision: endpoint });
       } catch (err) {
-        (input as unknown as PluginContext).logger?.warn("Failed to handle approval action", { err, approvalId });
+        pluginCtx.logger.warn("Failed to handle approval action", { err, approvalId });
       }
     }
   },
