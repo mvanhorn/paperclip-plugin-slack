@@ -23,6 +23,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.create",
     "agents.read",
     "events.subscribe",
+    "events.emit",
     "plugin.state.read",
     "plugin.state.write",
     "http.outbound",

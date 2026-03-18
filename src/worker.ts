@@ -8,6 +8,7 @@ import {
 import { WEBHOOK_KEYS } from "./constants.js";
 import { postMessage, respondToAction, respondEphemeral } from "./slack-api.js";
 import type { SlackMessage } from "./slack-api.js";
+import { handleAcpSlashCommand, handleAcpOutput, routeMessageToAcp } from "./acp-bridge.js";
 import {
   setBaseUrl,
   formatIssueCreated,
@@ -105,6 +106,19 @@ async function handleSlashCommand(ctx: PluginContext, rawBody: string): Promise<
       case "approve":
         await handleApproveCommand(ctx, responseUrl, arg);
         break;
+      case "acp": {
+        const slashParams = new URLSearchParams(rawBody);
+        const channel = slashParams.get("channel_id") ?? "";
+        const threadTs = slashParams.get("thread_ts") ?? "";
+        const acpText = parts.slice(1).join(" ");
+        await handleAcpSlashCommand(ctx, {
+          channel,
+          threadTs,
+          text: acpText,
+          companyId,
+        });
+        break;
+      }
       default:
         await respondEphemeral(ctx, responseUrl, {
           text: `Unknown command: \`${subcommand}\`. Use \`/clip help\` to see available commands.`,
@@ -178,6 +192,8 @@ async function handleHelpCommand(ctx: PluginContext, responseUrl: string): Promi
             "`/clip agents` - List all agents with status badges",
             "`/clip issues [open|done]` - List issues filtered by status",
             "`/clip approve <id>` - Approve a pending approval",
+            "`/clip acp bind <agentId>` - Bind an ACP agent to this thread",
+            "`/clip acp unbind` - Unbind the ACP agent from this thread",
             "`/clip help` - Show this help message",
           ].join("\n"),
         },
@@ -537,6 +553,21 @@ export default definePlugin({
 
       ctx.logger.info("Daily digest job registered (9am daily)");
     }
+
+    // --- ACP bridge ---
+
+    ctx.events.on("acp:output", (event: PluginEvent) =>
+      handleAcpOutput(ctx, token, event),
+    );
+
+    ctx.events.on("slack:thread_message", async (event: PluginEvent) => {
+      const p = event.payload as Record<string, unknown>;
+      const channel = String(p.channel ?? "");
+      const threadTs = String(p.threadTs ?? "");
+      const text = String(p.text ?? "");
+      if (!channel || !threadTs || !text) return;
+      await routeMessageToAcp(ctx, event.companyId, channel, threadTs, text);
+    });
 
     ctx.logger.info("Slack notifications plugin started (v1.0.0)");
   },
