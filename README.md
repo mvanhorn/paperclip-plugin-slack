@@ -1,5 +1,7 @@
 # paperclip-plugin-slack
 
+[![npm](https://img.shields.io/npm/v/paperclip-plugin-slack)](https://www.npmjs.com/package/paperclip-plugin-slack)
+
 Slack notifications plugin for [Paperclip](https://github.com/paperclipai/paperclip). Posts to Slack when agents create issues, complete tasks, request approvals, hit errors, or reach budget limits. Approve or reject requests directly from Slack with interactive buttons. Includes daily activity digests and per-type channel routing.
 
 Built on the Paperclip plugin SDK and the domain event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)).
