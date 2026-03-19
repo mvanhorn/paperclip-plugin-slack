@@ -5,9 +5,11 @@ import {
   type PluginWebhookInput,
   type PluginHealthDiagnostics,
 } from "@paperclipai/plugin-sdk";
+import { EscalationManager, type EscalationRequest, type EscalationRecord } from "@paperclipai/chat-core";
 import { WEBHOOK_KEYS } from "./constants.js";
 import { postMessage, respondToAction, respondEphemeral } from "./slack-api.js";
 import type { SlackMessage } from "./slack-api.js";
+import { SlackAdapter } from "./adapter.js";
 import { handleAcpSlashCommand, handleAcpOutput, routeMessageToAcp } from "./acp-bridge.js";
 import {
   setBaseUrl,
@@ -28,6 +30,7 @@ type SlackConfig = {
   approvalsChannelId: string;
   errorsChannelId: string;
   pipelineChannelId: string;
+  escalationChatId: string;
   notifyOnIssueCreated: boolean;
   notifyOnIssueDone: boolean;
   notifyOnApprovalCreated: boolean;
@@ -35,12 +38,132 @@ type SlackConfig = {
   notifyOnAgentConnected: boolean;
   notifyOnBudgetThreshold: boolean;
   enableDailyDigest: boolean;
+  escalationTimeoutMs: number;
+  escalationDefaultAction: string;
+  escalationHoldMessage: string;
   paperclipBaseUrl: string;
 };
 
 let pluginCtx: PluginContext;
 let pluginToken: string;
 let pluginConfig: SlackConfig;
+let escalationManager: EscalationManager;
+let slackAdapter: SlackAdapter;
+
+function formatEscalationMessage(escalation: EscalationRecord): SlackMessage {
+  const blocks: Array<Record<string, unknown>> = [];
+
+  blocks.push({
+    type: "header",
+    text: { type: "plain_text", text: `Escalation from ${escalation.agentName ?? "Agent"}` },
+  });
+
+  const fields: Array<{ type: string; text: string }> = [
+    { type: "mrkdwn", text: `*Reason*\n${escalation.reason}` },
+  ];
+  if (escalation.confidence != null) {
+    fields.push({ type: "mrkdwn", text: `*Confidence*\n${escalation.confidence}` });
+  }
+  blocks.push({ type: "section", fields });
+
+  if (escalation.conversationHistory && escalation.conversationHistory.length > 0) {
+    const lastMessages = escalation.conversationHistory.slice(-5);
+    const historyText = lastMessages
+      .map((msg: { role: string; text: string }) => `${msg.role}: ${msg.text}`)
+      .join("\n");
+    blocks.push({
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: `*Recent conversation*\n${historyText.slice(0, 2000)}` },
+      ],
+    });
+  }
+
+  if (escalation.agentReasoning) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Agent reasoning*\n${escalation.agentReasoning}`,
+      },
+    });
+  }
+
+  if (escalation.suggestedReply) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Suggested reply*\n> ${escalation.suggestedReply}`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Use Suggested Reply" },
+        style: "primary",
+        action_id: "escalation_use_suggested",
+        value: escalation.id,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Reply to Customer" },
+        action_id: "escalation_reply",
+        value: escalation.id,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Override Agent" },
+        action_id: "escalation_override",
+        value: escalation.id,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Dismiss" },
+        style: "danger",
+        action_id: "escalation_dismiss",
+        value: escalation.id,
+      },
+    ],
+  });
+
+  return {
+    text: `Escalation from ${escalation.agentName ?? "Agent"}: ${escalation.reason}`,
+    blocks,
+  };
+}
+
+function formatEscalationResolved(
+  escalationId: string,
+  action: string,
+  userId: string,
+): SlackMessage {
+  const emoji = action === "dismiss" ? ":x:" : ":white_check_mark:";
+  const label = action === "escalation_use_suggested"
+    ? "Used suggested reply"
+    : action === "escalation_override"
+      ? "Overrode agent"
+      : action === "escalation_dismiss"
+        ? "Dismissed"
+        : "Replied";
+
+  return {
+    text: `Escalation ${label} by ${userId}`,
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `${emoji} *Escalation ${label}* by <@${userId}>`,
+        },
+      },
+    ],
+  };
+}
 
 async function resolveChannel(
   ctx: PluginContext,
@@ -554,6 +677,193 @@ export default definePlugin({
       ctx.logger.info("Daily digest job registered (9am daily)");
     }
 
+    // --- Escalation support ---
+
+    slackAdapter = new SlackAdapter(ctx, token);
+    escalationManager = new EscalationManager({
+      adapter: slackAdapter,
+      timeoutMs: config.escalationTimeoutMs ?? 900000,
+      defaultAction: (config.escalationDefaultAction as "defer" | "dismiss" | "auto_reply") ?? "defer",
+      state: ctx.state,
+    });
+
+    ctx.events.on("escalation.created", async (event: PluginEvent) => {
+      const payload = event.payload as Record<string, unknown>;
+      const escalation = payload as unknown as EscalationRecord;
+      const channelId = config.escalationChatId || config.approvalsChannelId || config.defaultChannelId;
+      if (!channelId) return;
+
+      const message = formatEscalationMessage(escalation);
+      const result = await postMessage(ctx, token, channelId, message);
+
+      if (result.ok && result.ts) {
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-ts-${escalation.id}` },
+          result.ts,
+        );
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-channel-${escalation.id}` },
+          channelId,
+        );
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-record-${escalation.id}` },
+          { ...escalation, createdAt: new Date().toISOString(), status: "open" },
+        );
+        await ctx.activity.log({
+          companyId: event.companyId,
+          message: `Escalation posted to Slack: ${escalation.reason}`,
+          entityType: "plugin",
+          entityId: escalation.id,
+        });
+        await ctx.metrics.write("slack.escalations.created", 1);
+      }
+    });
+
+    ctx.events.on("slack:thread_reply_escalation", async (event: PluginEvent) => {
+      const p = event.payload as Record<string, unknown>;
+      const escalationId = String(p.escalationId ?? "");
+      const replyText = String(p.text ?? "");
+      const userId = String(p.userId ?? "unknown");
+      if (!escalationId || !replyText) return;
+
+      await escalationManager.resolve(escalationId, {
+        action: "human_reply",
+        replyText,
+        resolvedBy: `slack:${userId}`,
+      });
+
+      const record = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: `escalation-record-${escalationId}`,
+      }) as Record<string, unknown> | null;
+      if (record) {
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-record-${escalationId}` },
+          { ...record, status: "resolved", resolvedAt: new Date().toISOString(), resolvedBy: `slack:${userId}` },
+        );
+      }
+
+      await ctx.metrics.write("slack.escalations.resolved", 1, { action: "human_reply" });
+    });
+
+    ctx.tools.register("escalate_to_human", {
+      displayName: "Escalate to Human",
+      description: "Escalates the current conversation to a human operator via the configured Slack escalation channel.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          reason: { type: "string", description: "Why the agent is escalating" },
+          confidence: { type: "number", description: "Agent confidence score (0-1)" },
+          agentName: { type: "string", description: "Name of the escalating agent" },
+          conversationHistory: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                role: { type: "string" },
+                text: { type: "string" },
+              },
+            },
+            description: "Last N messages of conversation context",
+          },
+          agentReasoning: { type: "string", description: "Agent's reasoning for the escalation" },
+          suggestedReply: { type: "string", description: "Agent's suggested reply for the human to use" },
+          companyId: { type: "string", description: "Company ID for scoping" },
+        },
+        required: ["reason", "companyId"],
+      },
+      handler: async (params: Record<string, unknown>) => {
+        const escalationId = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const record: EscalationRecord = {
+          id: escalationId,
+          reason: String(params.reason ?? ""),
+          confidence: params.confidence != null ? Number(params.confidence) : undefined,
+          agentName: params.agentName != null ? String(params.agentName) : undefined,
+          conversationHistory: params.conversationHistory as Array<{ role: string; text: string }> | undefined,
+          agentReasoning: params.agentReasoning != null ? String(params.agentReasoning) : undefined,
+          suggestedReply: params.suggestedReply != null ? String(params.suggestedReply) : undefined,
+          status: "open",
+          createdAt: new Date().toISOString(),
+        };
+
+        ctx.events.emit("escalation.created", {
+          companyId: String(params.companyId),
+          ...record,
+        });
+
+        if (config.escalationHoldMessage) {
+          return { escalationId, holdMessage: config.escalationHoldMessage };
+        }
+        return { escalationId };
+      },
+    });
+
+    ctx.jobs.register("check-escalation-timeouts", async () => {
+      const companies = await ctx.companies.list({ limit: 100, offset: 0 });
+      const timeoutMs = config.escalationTimeoutMs ?? 900000;
+      const now = Date.now();
+
+      for (const company of companies) {
+        const openEscalations = await ctx.state.list({
+          scopeKind: "company",
+          scopeId: company.id,
+          prefix: "escalation-record-",
+        });
+
+        for (const entry of openEscalations) {
+          const record = entry.value as Record<string, unknown> | null;
+          if (!record || record.status !== "open") continue;
+
+          const createdAt = new Date(String(record.createdAt)).getTime();
+          if (now - createdAt < timeoutMs) continue;
+
+          const escalationId = String(record.id);
+          const defaultAction = config.escalationDefaultAction ?? "defer";
+
+          await escalationManager.resolve(escalationId, {
+            action: defaultAction,
+            resolvedBy: "system:timeout",
+          });
+
+          await ctx.state.set(
+            { scopeKind: "company", scopeId: company.id, stateKey: `escalation-record-${escalationId}` },
+            { ...record, status: "timed_out", resolvedAt: new Date().toISOString(), resolvedBy: "system:timeout" },
+          );
+
+          const channelId = await ctx.state.get({
+            scopeKind: "company",
+            scopeId: company.id,
+            stateKey: `escalation-channel-${escalationId}`,
+          }) as string | null;
+
+          const threadTs = await ctx.state.get({
+            scopeKind: "company",
+            scopeId: company.id,
+            stateKey: `escalation-ts-${escalationId}`,
+          }) as string | null;
+
+          if (channelId && threadTs) {
+            await postMessage(ctx, token, channelId, {
+              text: `Escalation timed out - default action: ${defaultAction}`,
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: `:hourglass: *Escalation timed out*\nDefault action applied: \`${defaultAction}\``,
+                  },
+                },
+              ],
+            }, { threadTs });
+          }
+
+          await ctx.metrics.write("slack.escalations.timed_out", 1, { action: defaultAction });
+          ctx.logger.info("Escalation timed out", { escalationId, defaultAction });
+        }
+      }
+    });
+
     // --- ACP bridge ---
 
     ctx.events.on("acp:output", (event: PluginEvent) =>
@@ -606,35 +916,83 @@ export default definePlugin({
 
       if (!approvalId) return;
 
-      let approved: boolean;
-      if (actionId === "approval_approve") {
-        approved = true;
-      } else if (actionId === "approval_reject") {
-        approved = false;
-      } else {
+      // --- Approval button handling ---
+      if (actionId === "approval_approve" || actionId === "approval_reject") {
+        const approved = actionId === "approval_approve";
+        const endpoint = approved ? "approve" : "reject";
+        try {
+          await pluginCtx.http.fetch(
+            `${pluginConfig.paperclipBaseUrl}/api/approvals/${approvalId}/${endpoint}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ decidedByUserId: `slack:${userId}` }),
+            },
+          );
+
+          await respondToAction(
+            pluginCtx,
+            pluginToken,
+            responseUrl,
+            formatApprovalResolved(approvalId, approved, userId),
+          );
+          await pluginCtx.metrics.write("slack.approvals.decided", 1, { decision: endpoint });
+        } catch (err) {
+          pluginCtx.logger.warn("Failed to handle approval action", { err, approvalId });
+        }
         return;
       }
 
-      const endpoint = approved ? "approve" : "reject";
-      try {
-        await pluginCtx.http.fetch(
-          `${pluginConfig.paperclipBaseUrl}/api/approvals/${approvalId}/${endpoint}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ decidedByUserId: `slack:${userId}` }),
-          },
-        );
+      // --- Escalation button handling ---
+      const escalationId = String(action.value ?? "");
+      if (
+        actionId === "escalation_use_suggested" ||
+        actionId === "escalation_reply" ||
+        actionId === "escalation_override" ||
+        actionId === "escalation_dismiss"
+      ) {
+        if (!escalationId) return;
 
-        await respondToAction(
-          pluginCtx,
-          pluginToken,
-          responseUrl,
-          formatApprovalResolved(approvalId, approved, userId),
-        );
-        await pluginCtx.metrics.write("slack.approvals.decided", 1, { decision: endpoint });
-      } catch (err) {
-        pluginCtx.logger.warn("Failed to handle approval action", { err, approvalId });
+        try {
+          const resolveAction = actionId === "escalation_use_suggested"
+            ? "use_suggested"
+            : actionId === "escalation_reply"
+              ? "human_reply"
+              : actionId === "escalation_override"
+                ? "override"
+                : "dismiss";
+
+          await escalationManager.resolve(escalationId, {
+            action: resolveAction,
+            resolvedBy: `slack:${userId}`,
+          });
+
+          const companies = await pluginCtx.companies.list({ limit: 1, offset: 0 });
+          const companyId = companies[0]?.id ?? "";
+
+          const record = await pluginCtx.state.get({
+            scopeKind: "company",
+            scopeId: companyId,
+            stateKey: `escalation-record-${escalationId}`,
+          }) as Record<string, unknown> | null;
+          if (record) {
+            await pluginCtx.state.set(
+              { scopeKind: "company", scopeId: companyId, stateKey: `escalation-record-${escalationId}` },
+              { ...record, status: "resolved", resolvedAt: new Date().toISOString(), resolvedBy: `slack:${userId}` },
+            );
+          }
+
+          await respondToAction(
+            pluginCtx,
+            pluginToken,
+            responseUrl,
+            formatEscalationResolved(escalationId, actionId, userId),
+          );
+          await pluginCtx.metrics.write("slack.escalations.resolved", 1, { action: resolveAction });
+        } catch (err) {
+          pluginCtx.logger.warn("Failed to handle escalation action", { err, escalationId });
+        }
+        return;
       }
     }
   },

@@ -21,6 +21,7 @@ export const DEFAULT_CONFIG = {
   approvalsChannelId: "",
   errorsChannelId: "",
   pipelineChannelId: "",
+  escalationChatId: "",
   notifyOnIssueCreated: true,
   notifyOnIssueDone: true,
   notifyOnApprovalCreated: true,
@@ -28,5 +29,8 @@ export const DEFAULT_CONFIG = {
   notifyOnAgentConnected: true,
   notifyOnBudgetThreshold: true,
   enableDailyDigest: false,
+  escalationTimeoutMs: 900000,
+  escalationDefaultAction: "defer",
+  escalationHoldMessage: "Your request has been escalated to a human agent. Please hold.",
   paperclipBaseUrl: "http://localhost:3100",
 } as const;

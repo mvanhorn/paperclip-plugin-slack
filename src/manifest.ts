@@ -33,6 +33,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "activity.log.write",
     "metrics.write",
     "jobs.schedule",
+    "tools.register",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -112,6 +113,30 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Base URL of your Paperclip instance for dashboard links.",
         default: DEFAULT_CONFIG.paperclipBaseUrl,
       },
+      escalationChatId: {
+        type: "string",
+        title: "Escalation Channel ID",
+        description: "Dedicated channel for escalation notifications (optional, falls back to approvalsChannelId or defaultChannelId).",
+        default: DEFAULT_CONFIG.escalationChatId,
+      },
+      escalationTimeoutMs: {
+        type: "number",
+        title: "Escalation Timeout (ms)",
+        description: "Time in milliseconds before an unresolved escalation triggers the default action.",
+        default: DEFAULT_CONFIG.escalationTimeoutMs,
+      },
+      escalationDefaultAction: {
+        type: "string",
+        title: "Escalation Default Action",
+        description: "Action to take when an escalation times out: 'defer', 'dismiss', or 'auto_reply'.",
+        default: DEFAULT_CONFIG.escalationDefaultAction,
+      },
+      escalationHoldMessage: {
+        type: "string",
+        title: "Escalation Hold Message",
+        description: "Message sent to the customer while waiting for a human to respond.",
+        default: DEFAULT_CONFIG.escalationHoldMessage,
+      },
     },
     required: ["slackTokenRef", "defaultChannelId"],
   },
@@ -121,6 +146,12 @@ const manifest: PaperclipPluginManifestV1 = {
       displayName: "Daily Activity Digest",
       description: "Posts a summary of agent activity, costs, and completed tasks to Slack.",
       schedule: "0 9 * * *",
+    },
+    {
+      jobKey: "check-escalation-timeouts",
+      displayName: "Check Escalation Timeouts",
+      description: "Checks for unresolved escalations that have exceeded the configured timeout.",
+      schedule: "*/1 * * * *",
     },
   ],
   webhooks: [
