@@ -10,7 +10,16 @@ import { WEBHOOK_KEYS } from "./constants.js";
 import { postMessage, respondToAction, respondEphemeral } from "./slack-api.js";
 import type { SlackMessage } from "./slack-api.js";
 import { SlackAdapter } from "./adapter.js";
-import { handleAcpSlashCommand, handleAcpOutput, routeMessageToAcp } from "./acp-bridge.js";
+import {
+  handleAcpSlashCommand,
+  handleAcpOutput,
+  routeMessageToAcp,
+  handleHandoffTool,
+  handleHandoffAction,
+  handleDiscussWithAgentTool,
+  handleDiscussionAction,
+  setAcpToken,
+} from "./acp-bridge.js";
 import {
   setBaseUrl,
   formatIssueCreated,
@@ -42,6 +51,7 @@ type SlackConfig = {
   escalationDefaultAction: string;
   escalationHoldMessage: string;
   paperclipBaseUrl: string;
+  maxAgentsPerThread: number;
 };
 
 let pluginCtx: PluginContext;
@@ -317,6 +327,9 @@ async function handleHelpCommand(ctx: PluginContext, responseUrl: string): Promi
             "`/clip approve <id>` - Approve a pending approval",
             "`/clip acp bind <agentId>` - Bind an ACP agent to this thread",
             "`/clip acp unbind` - Unbind the ACP agent from this thread",
+            "`/clip acp spawn <agent> [display]` - Add an agent to this thread (multi-agent)",
+            "`/clip acp status` - Show all agents in this thread",
+            "`/clip acp close [name]` - Close a specific agent (or most recent)",
             "`/clip help` - Show this help message",
           ].join("\n"),
         },
@@ -427,6 +440,7 @@ export default definePlugin({
 
     const token = await ctx.secrets.resolve(config.slackTokenRef);
     pluginToken = token;
+    setAcpToken(token);
 
     // --- Notification helper (supports per-type channel override + threading) ---
     const notify = async (
@@ -799,6 +813,48 @@ export default definePlugin({
       },
     });
 
+    ctx.tools.register("handoff_to_agent", {
+      displayName: "Handoff to Agent",
+      description: "Requests a handoff from one agent to another in the same Slack thread. Posts an approval prompt with Approve/Reject buttons.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fromAgent: { type: "string", description: "Name of the agent initiating the handoff" },
+          toAgent: { type: "string", description: "Name of the target agent to hand off to" },
+          reason: { type: "string", description: "Why the handoff is needed" },
+          context: { type: "string", description: "Context to pass to the target agent on approval" },
+          channelId: { type: "string", description: "Slack channel ID" },
+          threadTs: { type: "string", description: "Slack thread timestamp" },
+          companyId: { type: "string", description: "Company ID for scoping" },
+        },
+        required: ["fromAgent", "toAgent", "reason", "channelId", "threadTs", "companyId"],
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return handleHandoffTool(ctx, token, params);
+      },
+    });
+
+    ctx.tools.register("discuss_with_agent", {
+      displayName: "Discuss with Agent",
+      description: "Starts a conversation loop between two agents in a Slack thread. Messages are routed back and forth with agent labels. Pauses at human checkpoints every 5 turns.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          initiatorAgent: { type: "string", description: "Name of the agent starting the discussion" },
+          targetAgent: { type: "string", description: "Name of the other agent" },
+          topic: { type: "string", description: "The topic or question to discuss" },
+          maxTurns: { type: "number", description: "Maximum number of turns (default 10)" },
+          channelId: { type: "string", description: "Slack channel ID" },
+          threadTs: { type: "string", description: "Slack thread timestamp" },
+          companyId: { type: "string", description: "Company ID for scoping" },
+        },
+        required: ["initiatorAgent", "targetAgent", "topic", "channelId", "threadTs", "companyId"],
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return handleDiscussWithAgentTool(ctx, token, params);
+      },
+    });
+
     ctx.jobs.register("check-escalation-timeouts", async () => {
       const companies = await ctx.companies.list({ limit: 100, offset: 0 });
       const timeoutMs = config.escalationTimeoutMs ?? 900000;
@@ -875,8 +931,9 @@ export default definePlugin({
       const channel = String(p.channel ?? "");
       const threadTs = String(p.threadTs ?? "");
       const text = String(p.text ?? "");
+      const replyToMessageTs = p.replyToMessageTs != null ? String(p.replyToMessageTs) : undefined;
       if (!channel || !threadTs || !text) return;
-      await routeMessageToAcp(ctx, event.companyId, channel, threadTs, text);
+      await routeMessageToAcp(ctx, event.companyId, channel, threadTs, text, replyToMessageTs);
     });
 
     ctx.logger.info("Slack notifications plugin started (v1.0.0)");
@@ -991,6 +1048,64 @@ export default definePlugin({
           await pluginCtx.metrics.write("slack.escalations.resolved", 1, { action: resolveAction });
         } catch (err) {
           pluginCtx.logger.warn("Failed to handle escalation action", { err, escalationId });
+        }
+        return;
+      }
+
+      // --- Handoff button handling ---
+      if (actionId === "handoff_approve" || actionId === "handoff_reject") {
+        const handoffId = String(action.value ?? "");
+        if (!handoffId) return;
+
+        try {
+          const approved = actionId === "handoff_approve";
+          await handleHandoffAction(pluginCtx, pluginToken, handoffId, approved, userId);
+
+          const emoji = approved ? ":white_check_mark:" : ":x:";
+          const label = approved ? "Approved" : "Rejected";
+          await respondToAction(pluginCtx, pluginToken, responseUrl, {
+            text: `Handoff ${label} by ${userId}`,
+            blocks: [
+              {
+                type: "section",
+                text: {
+                  type: "mrkdwn",
+                  text: `${emoji} *Handoff ${label}* by <@${userId}>`,
+                },
+              },
+            ],
+          });
+        } catch (err) {
+          pluginCtx.logger.warn("Failed to handle handoff action", { err, handoffId: action.value });
+        }
+        return;
+      }
+
+      // --- Discussion loop button handling ---
+      if (actionId === "discussion_continue" || actionId === "discussion_stop") {
+        const discussionId = String(action.value ?? "");
+        if (!discussionId) return;
+
+        try {
+          const discAction = actionId === "discussion_continue" ? "continue" as const : "stop" as const;
+          await handleDiscussionAction(pluginCtx, pluginToken, discussionId, discAction, userId);
+
+          const emoji = discAction === "continue" ? ":arrow_forward:" : ":stop_button:";
+          const label = discAction === "continue" ? "Resumed" : "Stopped";
+          await respondToAction(pluginCtx, pluginToken, responseUrl, {
+            text: `Discussion ${label} by ${userId}`,
+            blocks: [
+              {
+                type: "section",
+                text: {
+                  type: "mrkdwn",
+                  text: `${emoji} *Discussion ${label}* by <@${userId}>`,
+                },
+              },
+            ],
+          });
+        } catch (err) {
+          pluginCtx.logger.warn("Failed to handle discussion action", { err, discussionId: action.value });
         }
         return;
       }

@@ -33,4 +33,5 @@ export const DEFAULT_CONFIG = {
   escalationDefaultAction: "defer",
   escalationHoldMessage: "Your request has been escalated to a human agent. Please hold.",
   paperclipBaseUrl: "http://localhost:3100",
+  maxAgentsPerThread: 5,
 } as const;

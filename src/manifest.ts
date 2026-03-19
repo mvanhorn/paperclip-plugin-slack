@@ -137,6 +137,12 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Message sent to the customer while waiting for a human to respond.",
         default: DEFAULT_CONFIG.escalationHoldMessage,
       },
+      maxAgentsPerThread: {
+        type: "number",
+        title: "Max Agents Per Thread",
+        description: "Maximum number of concurrent ACP agents allowed in a single Slack thread.",
+        default: DEFAULT_CONFIG.maxAgentsPerThread,
+      },
     },
     required: ["slackTokenRef", "defaultChannelId"],
   },
