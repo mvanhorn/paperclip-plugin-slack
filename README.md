@@ -36,6 +36,14 @@ This is that plugin.
 - Clicking a button calls the Paperclip API and updates the Slack message inline
 - Identifies which Slack user acted (logged as `slack:{user_id}`)
 
+**HITL escalation**
+- Agents that get stuck can escalate to a dedicated Slack channel with full conversation context
+- Rich Block Kit formatting with conversation history, agent reasoning, and confidence score
+- "Use Suggested Reply" button when the agent has a best-guess response
+- "Reply to Customer", "Override Agent", and "Dismiss" buttons
+- Configurable timeout (default 15 min) with automatic default action (defer, close, retry)
+- Customer messages queued during escalation and delivered with the human's response
+
 **Per-type channel routing**
 - Route approvals, errors, and pipeline events to separate Slack channels
 - Falls back to the default channel when a per-type channel isn't configured
@@ -75,6 +83,10 @@ This is that plugin.
 | `notifyOnAgentConnected` | Post when agents connect/disconnect (default: true) |
 | `notifyOnBudgetThreshold` | Post when agents hit budget limits (default: true) |
 | `enableDailyDigest` | Send daily activity summary at 9am (default: false) |
+| `escalationChatId` | Dedicated channel for agent escalations (optional) |
+| `escalationTimeoutMs` | Timeout before default action fires (default: 900000 / 15 min) |
+| `escalationDefaultAction` | Action on timeout: `defer`, `close`, `retry`, `escalate_further` (default: `defer`) |
+| `escalationHoldMessage` | Message sent to customer while waiting (default: "Let me check on that - I'll get back to you shortly.") |
 
 ## Development
 
@@ -86,6 +98,10 @@ npm run build
 ```
 
 Requires `@paperclipai/plugin-sdk` and `@paperclipai/shared` as peer dependencies. For local development, link them from the Paperclip monorepo.
+
+## Credits
+
+[@MatB57](https://github.com/MatB57) - Escalation channel concept, "Chat OS" vision for turning chat plugins into bidirectional agent command centers, and the HITL suggested-reply flow.
 
 ## License
 
