@@ -94,7 +94,7 @@ export async function spawnAgent(
       taskKey,
       reason: reason ?? `Spawned in Slack thread ${channelId}/${threadTs}`,
     });
-    sessionId = nativeSession.id;
+    sessionId = nativeSession.sessionId;
     transport = "native";
     ctx.logger.info("Native agent session created", { agentId, sessionId });
   } catch (err) {
@@ -235,16 +235,16 @@ export async function routeMessageToAgent(
     await ctx.agents.sessions.sendMessage(target.sessionId, companyId, {
       prompt: text,
       reason: `Slack message in ${channel}/${threadTs}`,
-      onEvent: (event: { type: string; data?: unknown }) => {
-        if (event.type === "text" && event.data) {
+      onEvent: (event) => {
+        if (event.eventType === "chunk" && event.message) {
           // Streaming output handled via event listener
-          ctx.events.emit("agent-stream-chunk", companyId, {
+          ctx.events.emit("plugin.slack.agent-stream-chunk", companyId, {
             agentName: target.agentName,
             agentDisplayName: target.agentDisplayName,
             sessionId: target.sessionId,
             channel,
             threadTs,
-            text: String(event.data),
+            text: event.message,
           });
         }
       },

@@ -9,7 +9,7 @@ const WATCHES_LIST_KEY = "global-watches-list";
 
 async function getAllWatches(ctx: PluginContext): Promise<WatchEntry[]> {
   const raw = await ctx.state.get({
-    scopeKind: "plugin",
+    scopeKind: "instance",
     scopeId: "global",
     stateKey: WATCHES_LIST_KEY,
   });
@@ -19,7 +19,7 @@ async function getAllWatches(ctx: PluginContext): Promise<WatchEntry[]> {
 
 async function setAllWatches(ctx: PluginContext, watches: WatchEntry[]): Promise<void> {
   await ctx.state.set(
-    { scopeKind: "plugin", scopeId: "global", stateKey: WATCHES_LIST_KEY },
+    { scopeKind: "instance", scopeId: "global", stateKey: WATCHES_LIST_KEY },
     watches,
   );
 }

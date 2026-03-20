@@ -8,7 +8,7 @@ import {
 import { WEBHOOK_KEYS, STATE_KEYS, PLUGIN_ID } from "./constants.js";
 import { postMessage, respondToAction, respondEphemeral } from "./slack-api.js";
 import type { SlackMessage } from "./slack-api.js";
-import type { SlackConfig, EscalationRecord, CommandDefinition } from "./types.js";
+import type { SlackConfig, EscalationRecord, CommandDefinition, SessionEntry } from "./types.js";
 import { SlackAdapter } from "./adapter.js";
 import {
   spawnAgent,
@@ -397,18 +397,19 @@ export default definePlugin({
           required: ["reason"],
         },
       },
-      async (params, runCtx) => {
+      async (params: unknown, runCtx) => {
+        const p = params as Record<string, unknown>;
         const companyId = runCtx.companyId;
         const escalationId = genId("esc");
 
         const record: EscalationRecord = {
           id: escalationId,
-          reason: String(params.reason ?? ""),
-          confidence: params.confidence != null ? Number(params.confidence) : undefined,
-          agentName: params.agentName != null ? String(params.agentName) : undefined,
-          conversationHistory: params.conversationHistory as Array<{ role: string; text: string }> | undefined,
-          agentReasoning: params.agentReasoning != null ? String(params.agentReasoning) : undefined,
-          suggestedReply: params.suggestedReply != null ? String(params.suggestedReply) : undefined,
+          reason: String(p.reason ?? ""),
+          confidence: p.confidence != null ? Number(p.confidence) : undefined,
+          agentName: p.agentName != null ? String(p.agentName) : undefined,
+          conversationHistory: p.conversationHistory as Array<{ role: string; text: string }> | undefined,
+          agentReasoning: p.agentReasoning != null ? String(p.agentReasoning) : undefined,
+          suggestedReply: p.suggestedReply != null ? String(p.suggestedReply) : undefined,
           status: "open",
           createdAt: new Date().toISOString(),
         };
@@ -472,14 +473,15 @@ export default definePlugin({
           required: ["fromAgent", "toAgent", "reason", "channelId", "threadTs"],
         },
       },
-      async (params, runCtx) => {
+      async (params: unknown, runCtx) => {
+        const p = params as Record<string, unknown>;
         const companyId = runCtx.companyId;
-        const fromAgent = String(params.fromAgent ?? "");
-        const toAgent = String(params.toAgent ?? "");
-        const reason = String(params.reason ?? "");
-        const channelId = String(params.channelId ?? "");
-        const threadTs = String(params.threadTs ?? "");
-        const context = params.context != null ? String(params.context) : undefined;
+        const fromAgent = String(p.fromAgent ?? "");
+        const toAgent = String(p.toAgent ?? "");
+        const reason = String(p.reason ?? "");
+        const channelId = String(p.channelId ?? "");
+        const threadTs = String(p.threadTs ?? "");
+        const context = p.context != null ? String(p.context) : undefined;
 
         const handoffId = genId("hoff");
 
@@ -527,15 +529,16 @@ export default definePlugin({
           required: ["initiatorAgent", "targetAgent", "topic", "channelId", "threadTs"],
         },
       },
-      async (params, runCtx) => {
+      async (params: unknown, runCtx) => {
+        const p = params as Record<string, unknown>;
         const companyId = runCtx.companyId;
         const result = await startDiscussion(ctx, token, companyId, {
-          initiatorAgent: String(params.initiatorAgent ?? ""),
-          targetAgent: String(params.targetAgent ?? ""),
-          topic: String(params.topic ?? ""),
-          channelId: String(params.channelId ?? ""),
-          threadTs: String(params.threadTs ?? ""),
-          maxTurns: Number(params.maxTurns ?? 10),
+          initiatorAgent: String(p.initiatorAgent ?? ""),
+          targetAgent: String(p.targetAgent ?? ""),
+          topic: String(p.topic ?? ""),
+          channelId: String(p.channelId ?? ""),
+          threadTs: String(p.threadTs ?? ""),
+          maxTurns: Number(p.maxTurns ?? 10),
         });
         return { content: JSON.stringify(result) };
       },
@@ -561,15 +564,16 @@ export default definePlugin({
           required: ["fileId", "channelId", "threadTs"],
         },
       },
-      async (params, runCtx) => {
+      async (params: unknown, runCtx) => {
+        const p = params as Record<string, unknown>;
         const result = await processMediaFile(
           ctx,
           token,
           runCtx.companyId,
-          String(params.fileId),
-          String(params.channelId),
-          String(params.threadTs),
-          params.briefAgentId ? String(params.briefAgentId) : undefined,
+          String(p.fileId),
+          String(p.channelId),
+          String(p.threadTs),
+          p.briefAgentId ? String(p.briefAgentId) : undefined,
         );
 
         if (!result) {
@@ -618,12 +622,13 @@ export default definePlugin({
           required: ["name", "description", "usage", "steps"],
         },
       },
-      async (params, runCtx) => {
+      async (params: unknown, runCtx) => {
+        const p = params as Record<string, unknown>;
         const command: CommandDefinition = {
-          name: String(params.name),
-          description: String(params.description),
-          usage: String(params.usage),
-          steps: (params.steps as CommandDefinition["steps"]) ?? [],
+          name: String(p.name),
+          description: String(p.description),
+          usage: String(p.usage),
+          steps: (p.steps as CommandDefinition["steps"]) ?? [],
         };
 
         const ok = await registerCommand(ctx, runCtx.companyId, command);
@@ -658,14 +663,15 @@ export default definePlugin({
           required: ["eventPattern", "agentId", "prompt", "channelId"],
         },
       },
-      async (params, runCtx) => {
+      async (params: unknown, runCtx) => {
+        const p = params as Record<string, unknown>;
         const watch = await registerWatch(ctx, runCtx.companyId, {
-          channelId: String(params.channelId),
-          threadTs: String(params.threadTs ?? ""),
+          channelId: String(p.channelId),
+          threadTs: String(p.threadTs ?? ""),
           companyId: runCtx.companyId,
-          eventPattern: String(params.eventPattern),
-          agentId: String(params.agentId),
-          prompt: String(params.prompt),
+          eventPattern: String(p.eventPattern),
+          agentId: String(p.agentId),
+          prompt: String(p.prompt),
           createdBy: runCtx.agentId ?? "tool",
         });
         return { content: JSON.stringify({ watchId: watch.id, eventPattern: watch.eventPattern }) };
@@ -685,9 +691,10 @@ export default definePlugin({
           required: ["watchId"],
         },
       },
-      async (params, _runCtx) => {
-        const removed = await removeWatch(ctx, String(params.watchId));
-        return { content: JSON.stringify({ removed, watchId: String(params.watchId) }) };
+      async (params: unknown, _runCtx) => {
+        const p = params as Record<string, unknown>;
+        const removed = await removeWatch(ctx, String(p.watchId));
+        return { content: JSON.stringify({ removed, watchId: String(p.watchId) }) };
       },
     );
 
@@ -748,7 +755,7 @@ export default definePlugin({
         const result = await notify(event, formatIssueCreated);
         if (result?.ok && result.ts) {
           await ctx.state.set(
-            { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadIssue(event.entityId) },
+            { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadIssue(event.entityId ?? "") },
             result.ts,
           );
         }
@@ -762,7 +769,7 @@ export default definePlugin({
         const threadTs = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
-          stateKey: STATE_KEYS.threadIssue(event.entityId),
+          stateKey: STATE_KEYS.threadIssue(event.entityId ?? ""),
         }) as string | null;
         await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
       });
@@ -790,7 +797,7 @@ export default definePlugin({
 
       ctx.events.on("agent.run.finished", async (event: PluginEvent) => {
         const payload = event.payload as Record<string, unknown>;
-        const key = STATE_KEYS.firstRunNotified(event.entityId);
+        const key = STATE_KEYS.firstRunNotified(event.entityId ?? "");
         const alreadyNotified = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
@@ -817,7 +824,7 @@ export default definePlugin({
         if (pct < 80) return;
 
         const bucket = pct >= 100 ? 100 : pct >= 90 ? 90 : 80;
-        const key = STATE_KEYS.budgetAlert(event.entityId, bucket);
+        const key = STATE_KEYS.budgetAlert(event.entityId ?? "", bucket);
         const alreadySent = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
@@ -977,14 +984,19 @@ export default definePlugin({
       const now = Date.now();
 
       for (const company of companies) {
-        const openEscalations = await ctx.state.list({
+        const openEscalationsRaw = await ctx.state.get({
           scopeKind: "company",
           scopeId: company.id,
-          prefix: "escalation-record-",
+          stateKey: "escalation-records-index",
         });
+        const escalationIds = Array.isArray(openEscalationsRaw) ? openEscalationsRaw as string[] : [];
 
-        for (const entry of openEscalations) {
-          const record = entry.value as Record<string, unknown> | null;
+        for (const escalationKey of escalationIds) {
+          const record = await ctx.state.get({
+            scopeKind: "company",
+            scopeId: company.id,
+            stateKey: STATE_KEYS.escalationRecord(escalationKey),
+          }) as Record<string, unknown> | null;
           if (!record || record.status !== "open") continue;
 
           const createdAt = new Date(String(record.createdAt)).getTime();
@@ -1061,7 +1073,7 @@ export default definePlugin({
     // =========================================================================
 
     // Native agent streaming output
-    ctx.events.on("agent-stream-chunk", async (event: PluginEvent) => {
+    ctx.events.on("plugin.slack.agent-stream-chunk", async (event: PluginEvent) => {
       const p = event.payload as Record<string, unknown>;
       await handleAgentOutput(ctx, token, event.companyId, {
         channel: String(p.channel ?? ""),
@@ -1087,7 +1099,7 @@ export default definePlugin({
     });
 
     // Escalation thread reply routing (from Slack Events API)
-    ctx.events.on("slack:thread_reply_escalation", async (event: PluginEvent) => {
+    ctx.events.on("plugin.slack.thread_reply_escalation", async (event: PluginEvent) => {
       const p = event.payload as Record<string, unknown>;
       const escalationId = String(p.escalationId ?? "");
       const replyText = String(p.text ?? "");
@@ -1135,7 +1147,7 @@ export default definePlugin({
     });
 
     // Thread message routing (multi-agent + custom commands + media)
-    ctx.events.on("slack:thread_message", async (event: PluginEvent) => {
+    ctx.events.on("plugin.slack.thread_message", async (event: PluginEvent) => {
       const p = event.payload as Record<string, unknown>;
       const channel = String(p.channel ?? "");
       const threadTs = String(p.threadTs ?? "");
@@ -1166,11 +1178,10 @@ export default definePlugin({
     });
 
     // Collect events for watch checking (Phase 5)
-    const watchableEvents = [
+    const watchableEvents: Array<"issue.created" | "issue.updated" | "agent.run.failed" | "agent.run.finished" | "agent.status_changed" | "cost_event.created" | "approval.created"> = [
       "issue.created", "issue.updated",
       "agent.run.failed", "agent.run.finished", "agent.status_changed",
       "cost_event.created", "approval.created",
-      "lead.created", "deal.stalled",
     ];
     for (const eventType of watchableEvents) {
       ctx.events.on(eventType, async (event: PluginEvent) => {

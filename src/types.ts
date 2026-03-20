@@ -36,6 +36,7 @@ export interface DiscussionLoop {
   id: string;
   channelId: string;
   threadTs: string;
+  companyId?: string;
   initiatorAgent: string;
   targetAgent: string;
   reason: string;
