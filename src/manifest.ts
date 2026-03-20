@@ -47,8 +47,9 @@ const manifest: PaperclipPluginManifestV1 = {
     properties: {
       slackTokenRef: {
         type: "string",
+        format: "secret-ref",
         title: "Slack Bot Token (secret reference)",
-        description: "Reference to the Slack Bot OAuth token stored in your secret provider.",
+        description: "Secret UUID for your Slack Bot OAuth token. Create the secret in Settings → Secrets, then paste its UUID here.",
         default: DEFAULT_CONFIG.slackTokenRef,
       },
       defaultChannelId: {

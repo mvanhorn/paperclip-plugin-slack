@@ -133,8 +133,8 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
 2. Add the `chat:write` bot scope
 3. Enable **Interactivity** and point the Request URL to your Paperclip host's `slack-interactivity` webhook endpoint
 4. Install the app to your workspace and copy the Bot OAuth Token
-5. Store the token in your Paperclip secret provider
-6. Install the plugin and configure the secret reference + channel ID
+5. In Paperclip, go to **Settings → Secrets** and create a new secret with your Bot OAuth Token. Copy the secret UUID.
+6. Install the plugin and configure the secret UUID in the `slackTokenRef` field + your default channel ID
 
 ## Configuration
 
@@ -173,6 +173,14 @@ The plugin registers these tools that agents can call:
 | `register_watch` | 5 | Register an event watch that triggers an agent on matching events |
 | `remove_watch` | 5 | Remove a registered event watch |
 | `list_watch_templates` | 5 | List built-in watch templates for common use cases |
+
+## Migration
+
+### v2.0.1
+
+The `slackTokenRef` field now declares `format: "secret-ref"`, which is required for Paperclip to collect and resolve secret references at activation time. Previously, the field was a plain `string` with no format annotation, causing plugin activation to fail with `Invalid secret reference`.
+
+**If you installed v2.0.0:** you must re-configure the plugin. Go to **Settings → Secrets**, create a secret with your Slack Bot OAuth Token, and paste the resulting secret UUID into the `slackTokenRef` field in the plugin configuration. Raw token strings are no longer accepted in this field.
 
 ## Development
 
