@@ -58,6 +58,20 @@ This is that plugin.
 - `/clip status` - Show agent and task status
 - `/clip help` - List available commands
 
+## Install
+
+```bash
+npm install paperclip-plugin-slack
+```
+
+Or register with your Paperclip instance directly:
+
+```bash
+curl -X POST http://127.0.0.1:3100/api/plugins/install \
+  -H "Content-Type: application/json" \
+  -d '{"packageName":"paperclip-plugin-slack"}'
+```
+
 ## Setup
 
 1. Create a Slack app at https://api.slack.com/apps
