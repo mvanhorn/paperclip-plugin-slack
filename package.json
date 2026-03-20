@@ -1,13 +1,14 @@
 {
   "name": "paperclip-plugin-slack",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "dev": "tsc --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
     "@paperclipai/plugin-sdk": ">=2026.0.0",
@@ -18,5 +19,12 @@
     "@paperclipai/shared": "^2026.318.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "files": [
+    "dist/"
+  ],
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
   }
 }
