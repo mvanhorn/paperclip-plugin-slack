@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-slack";
-export const PLUGIN_VERSION = "1.0.0";
+export const PLUGIN_VERSION = "2.0.0";
 
 export const WEBHOOK_KEYS = {
   slackEvents: "slack-events",
@@ -13,6 +13,26 @@ export const SLOT_IDS = {
 
 export const EXPORT_NAMES = {
   settingsPage: "SlackSettingsPage",
+} as const;
+
+export const STATE_KEYS = {
+  escalationRecord: (id: string) => `escalation-record-${id}`,
+  escalationTs: (id: string) => `escalation-ts-${id}`,
+  escalationChannel: (id: string) => `escalation-channel-${id}`,
+  sessionRegistry: (ch: string, ts: string) => `sessions_${ch}_${ts}`,
+  outputQueue: (ch: string, ts: string) => `output-queue_${ch}_${ts}`,
+  msgAgent: (ch: string, ts: string) => `msg-agent-${ch}-${ts}`,
+  activeDiscussion: (ch: string, ts: string) => `active-discussion-${ch}-${ts}`,
+  discussion: (id: string) => `discussion_${id}`,
+  handoff: (id: string) => `handoff-${id}`,
+  slackChannel: "slack-channel",
+  threadIssue: (id: string) => `thread-issue-${id}`,
+  dailyCost: (date: string) => `daily-cost-${date}`,
+  dailyAgentCosts: (date: string) => `daily-agent-costs-${date}`,
+  firstRunNotified: (id: string) => `first-run-notified-${id}`,
+  budgetAlert: (id: string, bucket: number) => `budget-alert-${id}-${bucket}`,
+  watchRegistry: (ch: string, ts: string) => `watches_${ch}_${ts}`,
+  commandRegistry: "custom-commands",
 } as const;
 
 export const DEFAULT_CONFIG = {

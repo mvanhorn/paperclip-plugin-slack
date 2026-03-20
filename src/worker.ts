@@ -5,20 +5,21 @@ import {
   type PluginWebhookInput,
   type PluginHealthDiagnostics,
 } from "@paperclipai/plugin-sdk";
-import { EscalationManager, type EscalationRequest, type EscalationRecord } from "@paperclipai/chat-core";
-import { WEBHOOK_KEYS } from "./constants.js";
+import { WEBHOOK_KEYS, STATE_KEYS, PLUGIN_ID } from "./constants.js";
 import { postMessage, respondToAction, respondEphemeral } from "./slack-api.js";
 import type { SlackMessage } from "./slack-api.js";
+import type { SlackConfig, EscalationRecord, CommandDefinition } from "./types.js";
 import { SlackAdapter } from "./adapter.js";
 import {
-  handleAcpSlashCommand,
-  handleAcpOutput,
-  routeMessageToAcp,
-  handleHandoffTool,
+  spawnAgent,
+  closeAgent,
+  routeMessageToAgent,
+  handleAgentOutput,
   handleHandoffAction,
-  handleDiscussWithAgentTool,
   handleDiscussionAction,
-  setAcpToken,
+  handleAcpSlashCommand,
+  startDiscussion,
+  buildHandoffBlocks,
 } from "./acp-bridge.js";
 import {
   setBaseUrl,
@@ -31,149 +32,30 @@ import {
   formatBudgetThreshold,
   formatOnboardingMilestone,
   formatDailyDigest,
+  formatEscalationMessage,
+  formatEscalationResolved,
 } from "./formatters.js";
-
-type SlackConfig = {
-  slackTokenRef: string;
-  defaultChannelId: string;
-  approvalsChannelId: string;
-  errorsChannelId: string;
-  pipelineChannelId: string;
-  escalationChatId: string;
-  notifyOnIssueCreated: boolean;
-  notifyOnIssueDone: boolean;
-  notifyOnApprovalCreated: boolean;
-  notifyOnAgentError: boolean;
-  notifyOnAgentConnected: boolean;
-  notifyOnBudgetThreshold: boolean;
-  enableDailyDigest: boolean;
-  escalationTimeoutMs: number;
-  escalationDefaultAction: string;
-  escalationHoldMessage: string;
-  paperclipBaseUrl: string;
-  maxAgentsPerThread: number;
-};
+import { processMediaFile, isMediaFile } from "./media-pipeline.js";
+import {
+  registerCommand,
+  handleCommandsSlash,
+  tryCustomCommand,
+  parseCommand,
+} from "./custom-commands.js";
+import {
+  registerWatch,
+  removeWatch,
+  listWatches,
+  checkWatches,
+  BUILTIN_WATCH_TEMPLATES,
+} from "./proactive-suggestions.js";
 
 let pluginCtx: PluginContext;
 let pluginToken: string;
 let pluginConfig: SlackConfig;
-let escalationManager: EscalationManager;
 let slackAdapter: SlackAdapter;
 
-function formatEscalationMessage(escalation: EscalationRecord): SlackMessage {
-  const blocks: Array<Record<string, unknown>> = [];
-
-  blocks.push({
-    type: "header",
-    text: { type: "plain_text", text: `Escalation from ${escalation.agentName ?? "Agent"}` },
-  });
-
-  const fields: Array<{ type: string; text: string }> = [
-    { type: "mrkdwn", text: `*Reason*\n${escalation.reason}` },
-  ];
-  if (escalation.confidence != null) {
-    fields.push({ type: "mrkdwn", text: `*Confidence*\n${escalation.confidence}` });
-  }
-  blocks.push({ type: "section", fields });
-
-  if (escalation.conversationHistory && escalation.conversationHistory.length > 0) {
-    const lastMessages = escalation.conversationHistory.slice(-5);
-    const historyText = lastMessages
-      .map((msg: { role: string; text: string }) => `${msg.role}: ${msg.text}`)
-      .join("\n");
-    blocks.push({
-      type: "context",
-      elements: [
-        { type: "mrkdwn", text: `*Recent conversation*\n${historyText.slice(0, 2000)}` },
-      ],
-    });
-  }
-
-  if (escalation.agentReasoning) {
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Agent reasoning*\n${escalation.agentReasoning}`,
-      },
-    });
-  }
-
-  if (escalation.suggestedReply) {
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Suggested reply*\n> ${escalation.suggestedReply}`,
-      },
-    });
-  }
-
-  blocks.push({
-    type: "actions",
-    elements: [
-      {
-        type: "button",
-        text: { type: "plain_text", text: "Use Suggested Reply" },
-        style: "primary",
-        action_id: "escalation_use_suggested",
-        value: escalation.id,
-      },
-      {
-        type: "button",
-        text: { type: "plain_text", text: "Reply to Customer" },
-        action_id: "escalation_reply",
-        value: escalation.id,
-      },
-      {
-        type: "button",
-        text: { type: "plain_text", text: "Override Agent" },
-        action_id: "escalation_override",
-        value: escalation.id,
-      },
-      {
-        type: "button",
-        text: { type: "plain_text", text: "Dismiss" },
-        style: "danger",
-        action_id: "escalation_dismiss",
-        value: escalation.id,
-      },
-    ],
-  });
-
-  return {
-    text: `Escalation from ${escalation.agentName ?? "Agent"}: ${escalation.reason}`,
-    blocks,
-  };
-}
-
-function formatEscalationResolved(
-  escalationId: string,
-  action: string,
-  userId: string,
-): SlackMessage {
-  const emoji = action === "dismiss" ? ":x:" : ":white_check_mark:";
-  const label = action === "escalation_use_suggested"
-    ? "Used suggested reply"
-    : action === "escalation_override"
-      ? "Overrode agent"
-      : action === "escalation_dismiss"
-        ? "Dismissed"
-        : "Replied";
-
-  return {
-    text: `Escalation ${label} by ${userId}`,
-    blocks: [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `${emoji} *Escalation ${label}* by <@${userId}>`,
-        },
-      },
-    ],
-  };
-}
+// --- Helpers ---
 
 async function resolveChannel(
   ctx: PluginContext,
@@ -183,12 +65,19 @@ async function resolveChannel(
   const override = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
-    stateKey: "slack-channel",
+    stateKey: STATE_KEYS.slackChannel,
   });
   return (override as string) ?? fallback ?? null;
 }
 
-function parseSlashCommand(rawBody: string): { command: string; text: string; responseUrl: string; userId: string; channelId: string } {
+function parseSlashCommand(rawBody: string): {
+  command: string;
+  text: string;
+  responseUrl: string;
+  userId: string;
+  channelId: string;
+  threadTs: string;
+} {
   const params = new URLSearchParams(rawBody);
   return {
     command: params.get("command") ?? "",
@@ -196,6 +85,7 @@ function parseSlashCommand(rawBody: string): { command: string; text: string; re
     responseUrl: params.get("response_url") ?? "",
     userId: params.get("user_id") ?? "",
     channelId: params.get("channel_id") ?? "",
+    threadTs: params.get("thread_ts") ?? "",
   };
 }
 
@@ -212,8 +102,14 @@ function statusBadge(status: string): string {
   return badges[status] ?? ":white_circle:";
 }
 
+function genId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// --- Slash command routing ---
+
 async function handleSlashCommand(ctx: PluginContext, rawBody: string): Promise<void> {
-  const { text, responseUrl } = parseSlashCommand(rawBody);
+  const { text, responseUrl, channelId, threadTs } = parseSlashCommand(rawBody);
   const parts = text.trim().split(/\s+/);
   const subcommand = parts[0]?.toLowerCase() ?? "";
   const arg = parts[1]?.toLowerCase() ?? "";
@@ -240,16 +136,42 @@ async function handleSlashCommand(ctx: PluginContext, rawBody: string): Promise<
         await handleApproveCommand(ctx, responseUrl, arg);
         break;
       case "acp": {
-        const slashParams = new URLSearchParams(rawBody);
-        const channel = slashParams.get("channel_id") ?? "";
-        const threadTs = slashParams.get("thread_ts") ?? "";
         const acpText = parts.slice(1).join(" ");
-        await handleAcpSlashCommand(ctx, {
-          channel,
+        await handleAcpSlashCommand(ctx, pluginToken, {
+          channel: channelId,
           threadTs,
           text: acpText,
           companyId,
         });
+        break;
+      }
+      case "commands":
+        await handleCommandsSlash(ctx, companyId, responseUrl);
+        break;
+      case "watches": {
+        const watches = await listWatches(ctx, companyId);
+        if (watches.length === 0) {
+          await respondEphemeral(ctx, responseUrl, {
+            text: "No active watches. Use the `register_watch` tool to add watches.",
+          });
+        } else {
+          const lines = watches.map((w) =>
+            `:bell: \`${w.eventPattern}\` -> *${w.agentId}* (triggered ${w.triggerCount}x)`
+          );
+          await respondEphemeral(ctx, responseUrl, {
+            text: `${watches.length} active watch(es)`,
+            blocks: [
+              {
+                type: "header",
+                text: { type: "plain_text", text: `Active Watches (${watches.length})` },
+              },
+              {
+                type: "section",
+                text: { type: "mrkdwn", text: lines.join("\n") },
+              },
+            ],
+          });
+        }
         break;
       }
       default:
@@ -325,11 +247,11 @@ async function handleHelpCommand(ctx: PluginContext, responseUrl: string): Promi
             "`/clip agents` - List all agents with status badges",
             "`/clip issues [open|done]` - List issues filtered by status",
             "`/clip approve <id>` - Approve a pending approval",
-            "`/clip acp bind <agentId>` - Bind an ACP agent to this thread",
-            "`/clip acp unbind` - Unbind the ACP agent from this thread",
-            "`/clip acp spawn <agent> [display]` - Add an agent to this thread (multi-agent)",
+            "`/clip acp spawn <agent> [display]` - Add an agent to this thread",
             "`/clip acp status` - Show all agents in this thread",
             "`/clip acp close [name]` - Close a specific agent (or most recent)",
+            "`/clip commands` - List registered custom commands",
+            "`/clip watches` - List active event watches",
             "`/clip help` - Show this help message",
           ].join("\n"),
         },
@@ -421,6 +343,8 @@ async function handleApproveCommand(ctx: PluginContext, responseUrl: string, app
   }
 }
 
+// --- Plugin definition ---
+
 export default definePlugin({
   async setup(ctx) {
     const rawConfig = await ctx.config.get();
@@ -440,9 +364,357 @@ export default definePlugin({
 
     const token = await ctx.secrets.resolve(config.slackTokenRef);
     pluginToken = token;
-    setAcpToken(token);
 
-    // --- Notification helper (supports per-type channel override + threading) ---
+    // =========================================================================
+    // PHASE 1: Escalation - using 3-arg ctx.tools.register with ToolRunContext
+    // =========================================================================
+
+    ctx.tools.register(
+      "escalate_to_human",
+      {
+        displayName: "Escalate to Human",
+        description: "Escalates the current conversation to a human operator via the configured Slack escalation channel.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            reason: { type: "string", description: "Why the agent is escalating" },
+            confidence: { type: "number", description: "Agent confidence score (0-1)" },
+            agentName: { type: "string", description: "Name of the escalating agent" },
+            conversationHistory: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  role: { type: "string" },
+                  text: { type: "string" },
+                },
+              },
+              description: "Last N messages of conversation context",
+            },
+            agentReasoning: { type: "string", description: "Agent's reasoning for the escalation" },
+            suggestedReply: { type: "string", description: "Agent's suggested reply for the human to use" },
+          },
+          required: ["reason"],
+        },
+      },
+      async (params, runCtx) => {
+        const companyId = runCtx.companyId;
+        const escalationId = genId("esc");
+
+        const record: EscalationRecord = {
+          id: escalationId,
+          reason: String(params.reason ?? ""),
+          confidence: params.confidence != null ? Number(params.confidence) : undefined,
+          agentName: params.agentName != null ? String(params.agentName) : undefined,
+          conversationHistory: params.conversationHistory as Array<{ role: string; text: string }> | undefined,
+          agentReasoning: params.agentReasoning != null ? String(params.agentReasoning) : undefined,
+          suggestedReply: params.suggestedReply != null ? String(params.suggestedReply) : undefined,
+          status: "open",
+          createdAt: new Date().toISOString(),
+        };
+
+        const channelId = config.escalationChatId || config.approvalsChannelId || config.defaultChannelId;
+        if (!channelId) {
+          return { error: "No escalation channel configured" };
+        }
+
+        const message = formatEscalationMessage(record);
+        const result = await postMessage(ctx, token, channelId, message);
+
+        if (result.ok && result.ts) {
+          await ctx.state.set(
+            { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.escalationTs(escalationId) },
+            result.ts,
+          );
+          await ctx.state.set(
+            { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.escalationChannel(escalationId) },
+            channelId,
+          );
+          await ctx.state.set(
+            { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.escalationRecord(escalationId) },
+            record,
+          );
+          await ctx.activity.log({
+            companyId,
+            message: `Escalation posted to Slack: ${record.reason}`,
+            entityType: "plugin",
+            entityId: escalationId,
+          });
+          await ctx.metrics.write("slack.escalations.created", 1);
+        }
+
+        if (config.escalationHoldMessage) {
+          return { content: JSON.stringify({ escalationId, holdMessage: config.escalationHoldMessage }) };
+        }
+        return { content: JSON.stringify({ escalationId }) };
+      },
+    );
+
+    // =========================================================================
+    // PHASE 2: Multi-Agent - handoff and discuss tools
+    // =========================================================================
+
+    ctx.tools.register(
+      "handoff_to_agent",
+      {
+        displayName: "Handoff to Agent",
+        description: "Requests a handoff from one agent to another in the same Slack thread. Posts an approval prompt with Approve/Reject buttons.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            fromAgent: { type: "string", description: "Name of the agent initiating the handoff" },
+            toAgent: { type: "string", description: "Name of the target agent to hand off to" },
+            reason: { type: "string", description: "Why the handoff is needed" },
+            context: { type: "string", description: "Context to pass to the target agent on approval" },
+            channelId: { type: "string", description: "Slack channel ID" },
+            threadTs: { type: "string", description: "Slack thread timestamp" },
+          },
+          required: ["fromAgent", "toAgent", "reason", "channelId", "threadTs"],
+        },
+      },
+      async (params, runCtx) => {
+        const companyId = runCtx.companyId;
+        const fromAgent = String(params.fromAgent ?? "");
+        const toAgent = String(params.toAgent ?? "");
+        const reason = String(params.reason ?? "");
+        const channelId = String(params.channelId ?? "");
+        const threadTs = String(params.threadTs ?? "");
+        const context = params.context != null ? String(params.context) : undefined;
+
+        const handoffId = genId("hoff");
+
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.handoff(handoffId) },
+          {
+            id: handoffId,
+            fromAgent,
+            toAgent,
+            reason,
+            context,
+            channelId,
+            threadTs,
+            companyId,
+            status: "pending",
+            createdAt: new Date().toISOString(),
+          },
+        );
+
+        const blocks = buildHandoffBlocks(fromAgent, toAgent, reason, handoffId);
+        await postMessage(ctx, token, channelId, {
+          text: `Handoff: ${fromAgent} -> ${toAgent}: ${reason}`,
+          blocks,
+        }, threadTs ? { threadTs } : undefined);
+
+        return { content: JSON.stringify({ handoffId, status: "pending" }) };
+      },
+    );
+
+    ctx.tools.register(
+      "discuss_with_agent",
+      {
+        displayName: "Discuss with Agent",
+        description: "Starts a conversation loop between two agents in a Slack thread with human checkpoints every 5 turns.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            initiatorAgent: { type: "string", description: "Name of the agent starting the discussion" },
+            targetAgent: { type: "string", description: "Name of the other agent" },
+            topic: { type: "string", description: "The topic or question to discuss" },
+            maxTurns: { type: "number", description: "Maximum number of turns (default 10)" },
+            channelId: { type: "string", description: "Slack channel ID" },
+            threadTs: { type: "string", description: "Slack thread timestamp" },
+          },
+          required: ["initiatorAgent", "targetAgent", "topic", "channelId", "threadTs"],
+        },
+      },
+      async (params, runCtx) => {
+        const companyId = runCtx.companyId;
+        const result = await startDiscussion(ctx, token, companyId, {
+          initiatorAgent: String(params.initiatorAgent ?? ""),
+          targetAgent: String(params.targetAgent ?? ""),
+          topic: String(params.topic ?? ""),
+          channelId: String(params.channelId ?? ""),
+          threadTs: String(params.threadTs ?? ""),
+          maxTurns: Number(params.maxTurns ?? 10),
+        });
+        return { content: JSON.stringify(result) };
+      },
+    );
+
+    // =========================================================================
+    // PHASE 3: Media Pipeline tool
+    // =========================================================================
+
+    ctx.tools.register(
+      "process_media",
+      {
+        displayName: "Process Media",
+        description: "Processes a media file (audio/video) from Slack - transcribes audio and optionally generates a brief.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            fileId: { type: "string", description: "Slack file ID to process" },
+            channelId: { type: "string", description: "Channel to post results to" },
+            threadTs: { type: "string", description: "Thread to post results in" },
+            briefAgentId: { type: "string", description: "Optional agent ID to generate a brief from the transcription" },
+          },
+          required: ["fileId", "channelId", "threadTs"],
+        },
+      },
+      async (params, runCtx) => {
+        const result = await processMediaFile(
+          ctx,
+          token,
+          runCtx.companyId,
+          String(params.fileId),
+          String(params.channelId),
+          String(params.threadTs),
+          params.briefAgentId ? String(params.briefAgentId) : undefined,
+        );
+
+        if (!result) {
+          return { error: "Failed to process media file" };
+        }
+        return { content: JSON.stringify(result) };
+      },
+    );
+
+    // =========================================================================
+    // PHASE 4: Custom Commands tool
+    // =========================================================================
+
+    ctx.tools.register(
+      "register_command",
+      {
+        displayName: "Register Custom Command",
+        description: "Registers a custom !command that can be triggered from Slack messages. Commands can have workflow steps like invoking agents, posting messages, or creating issues.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Command name (without ! prefix)" },
+            description: { type: "string", description: "What the command does" },
+            usage: { type: "string", description: "Usage example (e.g. '!deploy staging')" },
+            steps: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  type: {
+                    type: "string",
+                    enum: ["invoke_agent", "post_message", "create_issue", "wait_approval"],
+                  },
+                  agentId: { type: "string" },
+                  prompt: { type: "string" },
+                  message: { type: "string" },
+                  issueTitle: { type: "string" },
+                  issueDescription: { type: "string" },
+                  timeout: { type: "number" },
+                },
+                required: ["type"],
+              },
+              description: "Workflow steps to execute",
+            },
+          },
+          required: ["name", "description", "usage", "steps"],
+        },
+      },
+      async (params, runCtx) => {
+        const command: CommandDefinition = {
+          name: String(params.name),
+          description: String(params.description),
+          usage: String(params.usage),
+          steps: (params.steps as CommandDefinition["steps"]) ?? [],
+        };
+
+        const ok = await registerCommand(ctx, runCtx.companyId, command);
+        return { content: JSON.stringify({ registered: ok, name: command.name }) };
+      },
+    );
+
+    // =========================================================================
+    // PHASE 5: Proactive Suggestions tool
+    // =========================================================================
+
+    ctx.tools.register(
+      "register_watch",
+      {
+        displayName: "Register Event Watch",
+        description: "Registers a watch that triggers an agent when a matching event occurs. The agent will be invoked with a prompt interpolated with event data.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            eventPattern: {
+              type: "string",
+              description: "Event pattern to watch (e.g. 'issue.created', 'agent.run.*')",
+            },
+            agentId: { type: "string", description: "Agent to invoke when triggered" },
+            prompt: {
+              type: "string",
+              description: "Prompt template (use ${event.payload.key} for interpolation)",
+            },
+            channelId: { type: "string", description: "Slack channel to post results to" },
+            threadTs: { type: "string", description: "Optional thread to post results in" },
+          },
+          required: ["eventPattern", "agentId", "prompt", "channelId"],
+        },
+      },
+      async (params, runCtx) => {
+        const watch = await registerWatch(ctx, runCtx.companyId, {
+          channelId: String(params.channelId),
+          threadTs: String(params.threadTs ?? ""),
+          companyId: runCtx.companyId,
+          eventPattern: String(params.eventPattern),
+          agentId: String(params.agentId),
+          prompt: String(params.prompt),
+          createdBy: runCtx.agentId ?? "tool",
+        });
+        return { content: JSON.stringify({ watchId: watch.id, eventPattern: watch.eventPattern }) };
+      },
+    );
+
+    ctx.tools.register(
+      "remove_watch",
+      {
+        displayName: "Remove Event Watch",
+        description: "Removes a registered event watch by ID.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            watchId: { type: "string", description: "Watch ID to remove" },
+          },
+          required: ["watchId"],
+        },
+      },
+      async (params, _runCtx) => {
+        const removed = await removeWatch(ctx, String(params.watchId));
+        return { content: JSON.stringify({ removed, watchId: String(params.watchId) }) };
+      },
+    );
+
+    ctx.tools.register(
+      "list_watch_templates",
+      {
+        displayName: "List Watch Templates",
+        description: "Lists built-in watch templates for common use cases like sales follow-ups, deal monitoring, and error diagnosis.",
+        parametersSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+      async (_params, _runCtx) => {
+        const templates = BUILTIN_WATCH_TEMPLATES.map((t) => ({
+          name: t.name,
+          eventPattern: t.eventPattern,
+          description: t.description,
+        }));
+        return { content: JSON.stringify({ templates }) };
+      },
+    );
+
+    // =========================================================================
+    // Notification helper (supports per-type channel override + threading)
+    // =========================================================================
+
     const notify = async (
       event: PluginEvent,
       formatter: (e: PluginEvent) => SlackMessage,
@@ -467,14 +739,16 @@ export default definePlugin({
       return result;
     };
 
-    // --- Core event subscriptions ---
+    // =========================================================================
+    // Core event subscriptions (existing notifications)
+    // =========================================================================
 
     if (config.notifyOnIssueCreated) {
       ctx.events.on("issue.created", async (event: PluginEvent) => {
         const result = await notify(event, formatIssueCreated);
         if (result?.ok && result.ts) {
           await ctx.state.set(
-            { scopeKind: "company", scopeId: event.companyId, stateKey: `thread-issue-${event.entityId}` },
+            { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadIssue(event.entityId) },
             result.ts,
           );
         }
@@ -488,7 +762,7 @@ export default definePlugin({
         const threadTs = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
-          stateKey: `thread-issue-${event.entityId}`,
+          stateKey: STATE_KEYS.threadIssue(event.entityId),
         }) as string | null;
         await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
       });
@@ -516,7 +790,7 @@ export default definePlugin({
 
       ctx.events.on("agent.run.finished", async (event: PluginEvent) => {
         const payload = event.payload as Record<string, unknown>;
-        const key = `first-run-notified-${event.entityId}`;
+        const key = STATE_KEYS.firstRunNotified(event.entityId);
         const alreadyNotified = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
@@ -543,7 +817,7 @@ export default definePlugin({
         if (pct < 80) return;
 
         const bucket = pct >= 100 ? 100 : pct >= 90 ? 90 : 80;
-        const key = `budget-alert-${event.entityId}-${bucket}`;
+        const key = STATE_KEYS.budgetAlert(event.entityId, bucket);
         const alreadySent = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
@@ -560,14 +834,16 @@ export default definePlugin({
       });
     }
 
-    // --- Per-company channel overrides ---
+    // =========================================================================
+    // Per-company channel overrides
+    // =========================================================================
 
     ctx.data.register("channel-mapping", async (params) => {
       const companyId = String(params.companyId);
       const saved = await ctx.state.get({
         scopeKind: "company",
         scopeId: companyId,
-        stateKey: "slack-channel",
+        stateKey: STATE_KEYS.slackChannel,
       });
       return { channelId: saved ?? config.defaultChannelId };
     });
@@ -576,15 +852,18 @@ export default definePlugin({
       const companyId = String(params.companyId);
       const channelId = String(params.channelId);
       await ctx.state.set(
-        { scopeKind: "company", scopeId: companyId, stateKey: "slack-channel" },
+        { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.slackChannel },
         channelId,
       );
       ctx.logger.info("Updated Slack channel mapping", { companyId, channelId });
       return { ok: true };
     });
 
-    // --- Daily digest job ---
+    // =========================================================================
+    // Jobs
+    // =========================================================================
 
+    // Daily digest
     if (config.enableDailyDigest) {
       ctx.jobs.register("daily-digest", async () => {
         const companies = await ctx.companies.list({ limit: 100, offset: 0 });
@@ -614,14 +893,14 @@ export default definePlugin({
           const dailyCost = await ctx.state.get({
             scopeKind: "company",
             scopeId: company.id,
-            stateKey: `daily-cost-${dateKey}`,
+            stateKey: STATE_KEYS.dailyCost(dateKey),
           });
           const totalCost = dailyCost ? String((dailyCost as number).toFixed(2)) : "0.00";
 
           const topAgentCosts = await ctx.state.get({
             scopeKind: "company",
             scopeId: company.id,
-            stateKey: `daily-agent-costs-${dateKey}`,
+            stateKey: STATE_KEYS.dailyAgentCosts(dateKey),
           });
           let topAgent = "";
           if (topAgentCosts && typeof topAgentCosts === "object") {
@@ -645,19 +924,19 @@ export default definePlugin({
           await ctx.state.delete({
             scopeKind: "company",
             scopeId: company.id,
-            stateKey: `daily-cost-${yesterday}`,
+            stateKey: STATE_KEYS.dailyCost(yesterday),
           });
           await ctx.state.delete({
             scopeKind: "company",
             scopeId: company.id,
-            stateKey: `daily-agent-costs-${yesterday}`,
+            stateKey: STATE_KEYS.dailyAgentCosts(yesterday),
           });
         }
         ctx.logger.info("Daily digest posted to Slack");
         await ctx.metrics.write("slack.digest.sent", 1);
       });
 
-      // Accumulate costs from cost events for daily digest
+      // Accumulate costs
       ctx.events.on("cost_event.created", async (event: PluginEvent) => {
         const payload = event.payload as Record<string, unknown>;
         const cost = Number(payload.cost ?? 0);
@@ -667,10 +946,10 @@ export default definePlugin({
         const currentTotal = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
-          stateKey: `daily-cost-${dateKey}`,
+          stateKey: STATE_KEYS.dailyCost(dateKey),
         });
         await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: `daily-cost-${dateKey}` },
+          { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.dailyCost(dateKey) },
           ((currentTotal as number) ?? 0) + cost,
         );
 
@@ -678,12 +957,12 @@ export default definePlugin({
         const agentCosts = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
-          stateKey: `daily-agent-costs-${dateKey}`,
+          stateKey: STATE_KEYS.dailyAgentCosts(dateKey),
         });
         const costs = (agentCosts as Record<string, number>) ?? {};
         costs[agentName] = (costs[agentName] ?? 0) + cost;
         await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: `daily-agent-costs-${dateKey}` },
+          { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.dailyAgentCosts(dateKey) },
           costs,
         );
       });
@@ -691,170 +970,7 @@ export default definePlugin({
       ctx.logger.info("Daily digest job registered (9am daily)");
     }
 
-    // --- Escalation support ---
-
-    slackAdapter = new SlackAdapter(ctx, token);
-    escalationManager = new EscalationManager({
-      adapter: slackAdapter,
-      timeoutMs: config.escalationTimeoutMs ?? 900000,
-      defaultAction: (config.escalationDefaultAction as "defer" | "dismiss" | "auto_reply") ?? "defer",
-      state: ctx.state,
-    });
-
-    ctx.events.on("escalation.created", async (event: PluginEvent) => {
-      const payload = event.payload as Record<string, unknown>;
-      const escalation = payload as unknown as EscalationRecord;
-      const channelId = config.escalationChatId || config.approvalsChannelId || config.defaultChannelId;
-      if (!channelId) return;
-
-      const message = formatEscalationMessage(escalation);
-      const result = await postMessage(ctx, token, channelId, message);
-
-      if (result.ok && result.ts) {
-        await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-ts-${escalation.id}` },
-          result.ts,
-        );
-        await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-channel-${escalation.id}` },
-          channelId,
-        );
-        await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-record-${escalation.id}` },
-          { ...escalation, createdAt: new Date().toISOString(), status: "open" },
-        );
-        await ctx.activity.log({
-          companyId: event.companyId,
-          message: `Escalation posted to Slack: ${escalation.reason}`,
-          entityType: "plugin",
-          entityId: escalation.id,
-        });
-        await ctx.metrics.write("slack.escalations.created", 1);
-      }
-    });
-
-    ctx.events.on("slack:thread_reply_escalation", async (event: PluginEvent) => {
-      const p = event.payload as Record<string, unknown>;
-      const escalationId = String(p.escalationId ?? "");
-      const replyText = String(p.text ?? "");
-      const userId = String(p.userId ?? "unknown");
-      if (!escalationId || !replyText) return;
-
-      await escalationManager.resolve(escalationId, {
-        action: "human_reply",
-        replyText,
-        resolvedBy: `slack:${userId}`,
-      });
-
-      const record = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: event.companyId,
-        stateKey: `escalation-record-${escalationId}`,
-      }) as Record<string, unknown> | null;
-      if (record) {
-        await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: `escalation-record-${escalationId}` },
-          { ...record, status: "resolved", resolvedAt: new Date().toISOString(), resolvedBy: `slack:${userId}` },
-        );
-      }
-
-      await ctx.metrics.write("slack.escalations.resolved", 1, { action: "human_reply" });
-    });
-
-    ctx.tools.register("escalate_to_human", {
-      displayName: "Escalate to Human",
-      description: "Escalates the current conversation to a human operator via the configured Slack escalation channel.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          reason: { type: "string", description: "Why the agent is escalating" },
-          confidence: { type: "number", description: "Agent confidence score (0-1)" },
-          agentName: { type: "string", description: "Name of the escalating agent" },
-          conversationHistory: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                role: { type: "string" },
-                text: { type: "string" },
-              },
-            },
-            description: "Last N messages of conversation context",
-          },
-          agentReasoning: { type: "string", description: "Agent's reasoning for the escalation" },
-          suggestedReply: { type: "string", description: "Agent's suggested reply for the human to use" },
-          companyId: { type: "string", description: "Company ID for scoping" },
-        },
-        required: ["reason", "companyId"],
-      },
-      handler: async (params: Record<string, unknown>) => {
-        const escalationId = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const record: EscalationRecord = {
-          id: escalationId,
-          reason: String(params.reason ?? ""),
-          confidence: params.confidence != null ? Number(params.confidence) : undefined,
-          agentName: params.agentName != null ? String(params.agentName) : undefined,
-          conversationHistory: params.conversationHistory as Array<{ role: string; text: string }> | undefined,
-          agentReasoning: params.agentReasoning != null ? String(params.agentReasoning) : undefined,
-          suggestedReply: params.suggestedReply != null ? String(params.suggestedReply) : undefined,
-          status: "open",
-          createdAt: new Date().toISOString(),
-        };
-
-        ctx.events.emit("escalation.created", {
-          companyId: String(params.companyId),
-          ...record,
-        });
-
-        if (config.escalationHoldMessage) {
-          return { escalationId, holdMessage: config.escalationHoldMessage };
-        }
-        return { escalationId };
-      },
-    });
-
-    ctx.tools.register("handoff_to_agent", {
-      displayName: "Handoff to Agent",
-      description: "Requests a handoff from one agent to another in the same Slack thread. Posts an approval prompt with Approve/Reject buttons.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          fromAgent: { type: "string", description: "Name of the agent initiating the handoff" },
-          toAgent: { type: "string", description: "Name of the target agent to hand off to" },
-          reason: { type: "string", description: "Why the handoff is needed" },
-          context: { type: "string", description: "Context to pass to the target agent on approval" },
-          channelId: { type: "string", description: "Slack channel ID" },
-          threadTs: { type: "string", description: "Slack thread timestamp" },
-          companyId: { type: "string", description: "Company ID for scoping" },
-        },
-        required: ["fromAgent", "toAgent", "reason", "channelId", "threadTs", "companyId"],
-      },
-      handler: async (params: Record<string, unknown>) => {
-        return handleHandoffTool(ctx, token, params);
-      },
-    });
-
-    ctx.tools.register("discuss_with_agent", {
-      displayName: "Discuss with Agent",
-      description: "Starts a conversation loop between two agents in a Slack thread. Messages are routed back and forth with agent labels. Pauses at human checkpoints every 5 turns.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          initiatorAgent: { type: "string", description: "Name of the agent starting the discussion" },
-          targetAgent: { type: "string", description: "Name of the other agent" },
-          topic: { type: "string", description: "The topic or question to discuss" },
-          maxTurns: { type: "number", description: "Maximum number of turns (default 10)" },
-          channelId: { type: "string", description: "Slack channel ID" },
-          threadTs: { type: "string", description: "Slack thread timestamp" },
-          companyId: { type: "string", description: "Company ID for scoping" },
-        },
-        required: ["initiatorAgent", "targetAgent", "topic", "channelId", "threadTs", "companyId"],
-      },
-      handler: async (params: Record<string, unknown>) => {
-        return handleDiscussWithAgentTool(ctx, token, params);
-      },
-    });
-
+    // Escalation timeout job
     ctx.jobs.register("check-escalation-timeouts", async () => {
       const companies = await ctx.companies.list({ limit: 100, offset: 0 });
       const timeoutMs = config.escalationTimeoutMs ?? 900000;
@@ -877,26 +993,21 @@ export default definePlugin({
           const escalationId = String(record.id);
           const defaultAction = config.escalationDefaultAction ?? "defer";
 
-          await escalationManager.resolve(escalationId, {
-            action: defaultAction,
-            resolvedBy: "system:timeout",
-          });
-
           await ctx.state.set(
-            { scopeKind: "company", scopeId: company.id, stateKey: `escalation-record-${escalationId}` },
+            { scopeKind: "company", scopeId: company.id, stateKey: STATE_KEYS.escalationRecord(escalationId) },
             { ...record, status: "timed_out", resolvedAt: new Date().toISOString(), resolvedBy: "system:timeout" },
           );
 
           const channelId = await ctx.state.get({
             scopeKind: "company",
             scopeId: company.id,
-            stateKey: `escalation-channel-${escalationId}`,
+            stateKey: STATE_KEYS.escalationChannel(escalationId),
           }) as string | null;
 
           const threadTs = await ctx.state.get({
             scopeKind: "company",
             scopeId: company.id,
-            stateKey: `escalation-ts-${escalationId}`,
+            stateKey: STATE_KEYS.escalationTs(escalationId),
           }) as string | null;
 
           if (channelId && threadTs) {
@@ -920,40 +1031,215 @@ export default definePlugin({
       }
     });
 
-    // --- ACP bridge ---
+    // Phase 5: Check watches job
+    ctx.jobs.register("check-watches", async () => {
+      const companies = await ctx.companies.list({ limit: 100, offset: 0 });
+      for (const company of companies) {
+        // Get recent events from state (populated by event listeners below)
+        const recentEventsRaw = await ctx.state.get({
+          scopeKind: "company",
+          scopeId: company.id,
+          stateKey: "recent-watch-events",
+        });
+        const recentEvents = Array.isArray(recentEventsRaw)
+          ? (recentEventsRaw as Array<{ eventType: string; payload: Record<string, unknown> }>)
+          : [];
 
-    ctx.events.on("acp:output", (event: PluginEvent) =>
-      handleAcpOutput(ctx, token, event),
-    );
+        if (recentEvents.length > 0) {
+          await checkWatches(ctx, token, company.id, recentEvents);
+          // Clear after processing
+          await ctx.state.set(
+            { scopeKind: "company", scopeId: company.id, stateKey: "recent-watch-events" },
+            [],
+          );
+        }
+      }
+    });
 
+    // =========================================================================
+    // Agent output listeners (native streaming + ACP events)
+    // =========================================================================
+
+    // Native agent streaming output
+    ctx.events.on("agent-stream-chunk", async (event: PluginEvent) => {
+      const p = event.payload as Record<string, unknown>;
+      await handleAgentOutput(ctx, token, event.companyId, {
+        channel: String(p.channel ?? ""),
+        threadTs: String(p.threadTs ?? ""),
+        text: String(p.text ?? ""),
+        agentName: p.agentName != null ? String(p.agentName) : undefined,
+        agentDisplayName: p.agentDisplayName != null ? String(p.agentDisplayName) : undefined,
+        toolName: p.toolName != null ? String(p.toolName) : undefined,
+      });
+    });
+
+    // ACP output events (from cross-plugin)
+    ctx.events.on(`plugin.paperclip-plugin-acp.output`, async (event: PluginEvent) => {
+      const p = event.payload as Record<string, unknown>;
+      await handleAgentOutput(ctx, token, event.companyId, {
+        channel: String(p.channel ?? ""),
+        threadTs: String(p.threadTs ?? ""),
+        text: String(p.text ?? ""),
+        agentName: p.agentName != null ? String(p.agentName) : undefined,
+        agentDisplayName: p.agentDisplayName != null ? String(p.agentDisplayName) : undefined,
+        toolName: p.toolName != null ? String(p.toolName) : undefined,
+      });
+    });
+
+    // Escalation thread reply routing (from Slack Events API)
+    ctx.events.on("slack:thread_reply_escalation", async (event: PluginEvent) => {
+      const p = event.payload as Record<string, unknown>;
+      const escalationId = String(p.escalationId ?? "");
+      const replyText = String(p.text ?? "");
+      const userId = String(p.userId ?? "unknown");
+      if (!escalationId || !replyText) return;
+
+      const record = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: STATE_KEYS.escalationRecord(escalationId),
+      }) as Record<string, unknown> | null;
+
+      if (record) {
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.escalationRecord(escalationId) },
+          { ...record, status: "resolved", resolvedAt: new Date().toISOString(), resolvedBy: `slack:${userId}` },
+        );
+      }
+
+      // Route reply to agent session if we have one
+      if (record?.sessionId && record?.agentName) {
+        const sessions = await ctx.state.get({
+          scopeKind: "company",
+          scopeId: event.companyId,
+          stateKey: STATE_KEYS.sessionRegistry(
+            String(record.channelId ?? ""),
+            String(record.threadTs ?? ""),
+          ),
+        });
+        // Find session and send reply back
+        if (Array.isArray(sessions)) {
+          const session = (sessions as SessionEntry[]).find(
+            (s) => s.agentName === String(record.agentName) && s.status === "active",
+          );
+          if (session && session.transport === "native") {
+            await ctx.agents.sessions.sendMessage(session.sessionId, event.companyId, {
+              prompt: `Human reply to escalation: ${replyText}`,
+              reason: "Escalation reply from Slack",
+            });
+          }
+        }
+      }
+
+      await ctx.metrics.write("slack.escalations.resolved", 1, { action: "human_reply" });
+    });
+
+    // Thread message routing (multi-agent + custom commands + media)
     ctx.events.on("slack:thread_message", async (event: PluginEvent) => {
       const p = event.payload as Record<string, unknown>;
       const channel = String(p.channel ?? "");
       const threadTs = String(p.threadTs ?? "");
       const text = String(p.text ?? "");
       const replyToMessageTs = p.replyToMessageTs != null ? String(p.replyToMessageTs) : undefined;
-      if (!channel || !threadTs || !text) return;
-      await routeMessageToAcp(ctx, event.companyId, channel, threadTs, text, replyToMessageTs);
+      const files = Array.isArray(p.files) ? p.files as Array<Record<string, unknown>> : [];
+      if (!channel || !threadTs) return;
+
+      // Phase 3: Check for media files
+      for (const file of files) {
+        const fileId = String(file.id ?? "");
+        const mimetype = String(file.mimetype ?? "");
+        if (fileId && isMediaFile(mimetype)) {
+          await processMediaFile(ctx, token, event.companyId, fileId, channel, threadTs);
+        }
+      }
+
+      // Phase 4: Check for custom commands
+      if (text) {
+        const handled = await tryCustomCommand(ctx, token, event.companyId, channel, threadTs, text);
+        if (handled) return;
+      }
+
+      // Phase 2: Route to agent sessions
+      if (text) {
+        await routeMessageToAgent(ctx, event.companyId, channel, threadTs, text, replyToMessageTs);
+      }
     });
 
-    ctx.logger.info("Slack notifications plugin started (v1.0.0)");
+    // Collect events for watch checking (Phase 5)
+    const watchableEvents = [
+      "issue.created", "issue.updated",
+      "agent.run.failed", "agent.run.finished", "agent.status_changed",
+      "cost_event.created", "approval.created",
+      "lead.created", "deal.stalled",
+    ];
+    for (const eventType of watchableEvents) {
+      ctx.events.on(eventType, async (event: PluginEvent) => {
+        const recentEventsRaw = await ctx.state.get({
+          scopeKind: "company",
+          scopeId: event.companyId,
+          stateKey: "recent-watch-events",
+        });
+        const recentEvents = Array.isArray(recentEventsRaw)
+          ? (recentEventsRaw as Array<{ eventType: string; payload: Record<string, unknown> }>)
+          : [];
+
+        // Keep last 100 events
+        recentEvents.push({
+          eventType: event.eventType,
+          payload: event.payload as Record<string, unknown>,
+        });
+        if (recentEvents.length > 100) {
+          recentEvents.splice(0, recentEvents.length - 100);
+        }
+
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: "recent-watch-events" },
+          recentEvents,
+        );
+      });
+    }
+
+    slackAdapter = new SlackAdapter(ctx, token);
+
+    ctx.logger.info("Slack Chat OS plugin started (v2.0.0) - all 5 phases active");
   },
+
+  // =========================================================================
+  // Webhook handler (Slack Events, Slash Commands, Interactivity)
+  // =========================================================================
 
   async onWebhook(input: PluginWebhookInput): Promise<void> {
     const body = input.parsedBody as Record<string, unknown> | undefined;
 
+    // Slack Events API (url_verification + event callbacks)
     if (input.endpointKey === WEBHOOK_KEYS.slackEvents) {
       if (body?.type === "url_verification") {
         return;
       }
+
+      // Handle file_shared events for Phase 3 media pipeline
+      if (body?.type === "event_callback") {
+        const event = body.event as Record<string, unknown> | undefined;
+        if (event?.type === "file_shared") {
+          const companies = await pluginCtx.companies.list({ limit: 1, offset: 0 });
+          const companyId = companies[0]?.id ?? "";
+          const fileId = String(event.file_id ?? "");
+          const channelId = String(event.channel_id ?? "");
+
+          if (fileId && channelId) {
+            await processMediaFile(pluginCtx, pluginToken, companyId, fileId, channelId, "");
+          }
+        }
+      }
     }
 
+    // Slash commands
     if (input.endpointKey === WEBHOOK_KEYS.slashCommand) {
       await handleSlashCommand(pluginCtx, input.rawBody);
       return;
     }
 
-    // Handle interactive button clicks (approve/reject)
+    // Interactivity (button clicks)
     if (input.endpointKey === WEBHOOK_KEYS.interactivity) {
       const payload = body?.payload
         ? JSON.parse(String(body.payload)) as Record<string, unknown>
@@ -969,17 +1255,20 @@ export default definePlugin({
 
       const action = actions[0];
       const actionId = String(action.action_id ?? "");
-      const approvalId = String(action.value ?? "");
+      const actionValue = String(action.value ?? "");
 
-      if (!approvalId) return;
+      if (!actionValue) return;
 
-      // --- Approval button handling ---
+      const companies = await pluginCtx.companies.list({ limit: 1, offset: 0 });
+      const companyId = companies[0]?.id ?? "";
+
+      // --- Approval buttons ---
       if (actionId === "approval_approve" || actionId === "approval_reject") {
         const approved = actionId === "approval_approve";
         const endpoint = approved ? "approve" : "reject";
         try {
           await pluginCtx.http.fetch(
-            `${pluginConfig.paperclipBaseUrl}/api/approvals/${approvalId}/${endpoint}`,
+            `${pluginConfig.paperclipBaseUrl}/api/approvals/${actionValue}/${endpoint}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -991,50 +1280,32 @@ export default definePlugin({
             pluginCtx,
             pluginToken,
             responseUrl,
-            formatApprovalResolved(approvalId, approved, userId),
+            formatApprovalResolved(actionValue, approved, userId),
           );
           await pluginCtx.metrics.write("slack.approvals.decided", 1, { decision: endpoint });
         } catch (err) {
-          pluginCtx.logger.warn("Failed to handle approval action", { err, approvalId });
+          pluginCtx.logger.warn("Failed to handle approval action", { err, approvalId: actionValue });
         }
         return;
       }
 
-      // --- Escalation button handling ---
-      const escalationId = String(action.value ?? "");
+      // --- Escalation buttons ---
       if (
         actionId === "escalation_use_suggested" ||
         actionId === "escalation_reply" ||
         actionId === "escalation_override" ||
         actionId === "escalation_dismiss"
       ) {
-        if (!escalationId) return;
-
         try {
-          const resolveAction = actionId === "escalation_use_suggested"
-            ? "use_suggested"
-            : actionId === "escalation_reply"
-              ? "human_reply"
-              : actionId === "escalation_override"
-                ? "override"
-                : "dismiss";
-
-          await escalationManager.resolve(escalationId, {
-            action: resolveAction,
-            resolvedBy: `slack:${userId}`,
-          });
-
-          const companies = await pluginCtx.companies.list({ limit: 1, offset: 0 });
-          const companyId = companies[0]?.id ?? "";
-
           const record = await pluginCtx.state.get({
             scopeKind: "company",
             scopeId: companyId,
-            stateKey: `escalation-record-${escalationId}`,
+            stateKey: STATE_KEYS.escalationRecord(actionValue),
           }) as Record<string, unknown> | null;
+
           if (record) {
             await pluginCtx.state.set(
-              { scopeKind: "company", scopeId: companyId, stateKey: `escalation-record-${escalationId}` },
+              { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.escalationRecord(actionValue) },
               { ...record, status: "resolved", resolvedAt: new Date().toISOString(), resolvedBy: `slack:${userId}` },
             );
           }
@@ -1043,23 +1314,20 @@ export default definePlugin({
             pluginCtx,
             pluginToken,
             responseUrl,
-            formatEscalationResolved(escalationId, actionId, userId),
+            formatEscalationResolved(actionValue, actionId, userId),
           );
-          await pluginCtx.metrics.write("slack.escalations.resolved", 1, { action: resolveAction });
+          await pluginCtx.metrics.write("slack.escalations.resolved", 1, { action: actionId });
         } catch (err) {
-          pluginCtx.logger.warn("Failed to handle escalation action", { err, escalationId });
+          pluginCtx.logger.warn("Failed to handle escalation action", { err, escalationId: actionValue });
         }
         return;
       }
 
-      // --- Handoff button handling ---
+      // --- Handoff buttons ---
       if (actionId === "handoff_approve" || actionId === "handoff_reject") {
-        const handoffId = String(action.value ?? "");
-        if (!handoffId) return;
-
         try {
           const approved = actionId === "handoff_approve";
-          await handleHandoffAction(pluginCtx, pluginToken, handoffId, approved, userId);
+          await handleHandoffAction(pluginCtx, pluginToken, companyId, actionValue, approved, userId);
 
           const emoji = approved ? ":white_check_mark:" : ":x:";
           const label = approved ? "Approved" : "Rejected";
@@ -1076,19 +1344,16 @@ export default definePlugin({
             ],
           });
         } catch (err) {
-          pluginCtx.logger.warn("Failed to handle handoff action", { err, handoffId: action.value });
+          pluginCtx.logger.warn("Failed to handle handoff action", { err, handoffId: actionValue });
         }
         return;
       }
 
-      // --- Discussion loop button handling ---
+      // --- Discussion loop buttons ---
       if (actionId === "discussion_continue" || actionId === "discussion_stop") {
-        const discussionId = String(action.value ?? "");
-        if (!discussionId) return;
-
         try {
           const discAction = actionId === "discussion_continue" ? "continue" as const : "stop" as const;
-          await handleDiscussionAction(pluginCtx, pluginToken, discussionId, discAction, userId);
+          await handleDiscussionAction(pluginCtx, pluginToken, companyId, actionValue, discAction, userId);
 
           const emoji = discAction === "continue" ? ":arrow_forward:" : ":stop_button:";
           const label = discAction === "continue" ? "Resumed" : "Stopped";
@@ -1105,8 +1370,28 @@ export default definePlugin({
             ],
           });
         } catch (err) {
-          pluginCtx.logger.warn("Failed to handle discussion action", { err, discussionId: action.value });
+          pluginCtx.logger.warn("Failed to handle discussion action", { err, discussionId: actionValue });
         }
+        return;
+      }
+
+      // --- Command step approval buttons (Phase 4) ---
+      if (actionId === "command_step_approve" || actionId === "command_step_reject") {
+        const approved = actionId === "command_step_approve";
+        const emoji = approved ? ":white_check_mark:" : ":x:";
+        const label = approved ? "Approved" : "Rejected";
+        await respondToAction(pluginCtx, pluginToken, responseUrl, {
+          text: `Step ${label} by ${userId}`,
+          blocks: [
+            {
+              type: "section",
+              text: {
+                type: "mrkdwn",
+                text: `${emoji} *Step ${label}* by <@${userId}>`,
+              },
+            },
+          ],
+        });
         return;
       }
     }

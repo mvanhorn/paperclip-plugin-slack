@@ -1,8 +1,7 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import type { PlatformAdapter } from "@paperclipai/chat-core";
-import { postMessage } from "./slack-api.js";
+import { postMessage, updateMessage } from "./slack-api.js";
 
-export class SlackAdapter implements PlatformAdapter {
+export class SlackAdapter {
   private ctx: PluginContext;
   private token: string;
 
@@ -72,29 +71,7 @@ export class SlackAdapter implements PlatformAdapter {
     text: string,
     blocks?: Array<Record<string, unknown>>,
   ): Promise<{ ok: boolean }> {
-    const payload: Record<string, unknown> = {
-      channel: channelId,
-      ts,
-      text,
-    };
-    if (blocks) {
-      payload.blocks = blocks;
-    }
-
-    const response = await this.ctx.http.fetch("https://slack.com/api/chat.update", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${this.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const body = await response.json() as { ok: boolean; error?: string };
-    if (!body.ok) {
-      this.ctx.logger.warn("Slack chat.update failed", { error: body.error, channelId, ts });
-    }
-    return body;
+    return updateMessage(this.ctx, this.token, channelId, ts, { text, blocks });
   }
 
   formatAgentLabel(agentName: string): string {

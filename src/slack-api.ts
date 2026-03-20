@@ -74,6 +74,38 @@ export async function postMessage(
   return body;
 }
 
+export async function updateMessage(
+  ctx: PluginContext,
+  token: string,
+  channelId: string,
+  ts: string,
+  message: SlackMessage,
+): Promise<{ ok: boolean; error?: string }> {
+  const payload: Record<string, unknown> = {
+    channel: channelId,
+    ts,
+    text: message.text,
+  };
+  if (message.blocks) {
+    payload.blocks = message.blocks;
+  }
+
+  const response = await fetchWithRetry(ctx, `${SLACK_API_BASE}/chat.update`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const body = await response.json() as { ok: boolean; error?: string };
+  if (!body.ok) {
+    ctx.logger.warn("Slack chat.update failed", { error: body.error, channelId, ts });
+  }
+  return body;
+}
+
 export async function respondToAction(
   ctx: PluginContext,
   token: string,
@@ -116,4 +148,39 @@ export async function respondEphemeral(
       blocks: message.blocks,
     }),
   });
+}
+
+export async function getFileInfo(
+  ctx: PluginContext,
+  token: string,
+  fileId: string,
+): Promise<{ url: string; mimetype: string; name: string } | null> {
+  const response = await fetchWithRetry(ctx, `${SLACK_API_BASE}/files.info?file=${fileId}`, {
+    method: "GET",
+    headers: { "Authorization": `Bearer ${token}` },
+  });
+
+  const body = await response.json() as {
+    ok: boolean;
+    file?: { url_private_download?: string; mimetype?: string; name?: string };
+  };
+  if (!body.ok || !body.file) return null;
+  return {
+    url: body.file.url_private_download ?? "",
+    mimetype: body.file.mimetype ?? "",
+    name: body.file.name ?? "",
+  };
+}
+
+export async function downloadFile(
+  ctx: PluginContext,
+  token: string,
+  url: string,
+): Promise<ArrayBuffer | null> {
+  const response = await ctx.http.fetch(url, {
+    method: "GET",
+    headers: { "Authorization": `Bearer ${token}` },
+  });
+  if (response.status !== 200) return null;
+  return response.arrayBuffer();
 }

@@ -12,9 +12,9 @@ const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
   version: PLUGIN_VERSION,
-  displayName: "Slack Notifications",
+  displayName: "Slack Chat OS",
   description:
-    "Push Paperclip notifications to Slack when issues are created, completed, or need approval. Receive slash commands from Slack to check status and create issues.",
+    "Full Chat OS for Slack: escalation, multi-agent sessions, media pipeline, custom commands, and proactive suggestions. Push Paperclip notifications, receive slash commands, and manage agent workflows.",
   author: "mvanhorn",
   categories: ["connector", "automation"],
   capabilities: [
@@ -22,10 +22,16 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.read",
     "issues.create",
     "agents.read",
+    "agents.sessions.create",
+    "agents.sessions.sendMessage",
+    "agents.sessions.close",
+    "agents.invoke",
     "events.subscribe",
     "events.emit",
     "plugin.state.read",
     "plugin.state.write",
+    "plugin.state.list",
+    "plugin.state.delete",
     "http.outbound",
     "secrets.read-ref",
     "webhooks.receive",
@@ -140,7 +146,7 @@ const manifest: PaperclipPluginManifestV1 = {
       maxAgentsPerThread: {
         type: "number",
         title: "Max Agents Per Thread",
-        description: "Maximum number of concurrent ACP agents allowed in a single Slack thread.",
+        description: "Maximum number of concurrent agents allowed in a single Slack thread.",
         default: DEFAULT_CONFIG.maxAgentsPerThread,
       },
     },
@@ -159,12 +165,18 @@ const manifest: PaperclipPluginManifestV1 = {
       description: "Checks for unresolved escalations that have exceeded the configured timeout.",
       schedule: "*/1 * * * *",
     },
+    {
+      jobKey: "check-watches",
+      displayName: "Check Event Watches",
+      description: "Processes pending event watches and triggers agent invocations for matching events.",
+      schedule: "*/2 * * * *",
+    },
   ],
   webhooks: [
     {
       endpointKey: WEBHOOK_KEYS.slackEvents,
       displayName: "Slack Events API",
-      description: "Receives Slack Events API payloads (url_verification, event callbacks).",
+      description: "Receives Slack Events API payloads (url_verification, event callbacks, file_shared).",
     },
     {
       endpointKey: WEBHOOK_KEYS.slashCommand,
@@ -174,7 +186,7 @@ const manifest: PaperclipPluginManifestV1 = {
     {
       endpointKey: WEBHOOK_KEYS.interactivity,
       displayName: "Slack Interactivity",
-      description: "Receives button click payloads from interactive messages (approve/reject).",
+      description: "Receives button click payloads from interactive messages (approve/reject/escalation/handoff/discussion/command).",
     },
   ],
   ui: {

@@ -1,5 +1,6 @@
 import type { PluginEvent } from "@paperclipai/plugin-sdk";
-import type { SlackMessage } from "./slack-api.js";
+import type { SlackBlock, SlackMessage } from "./slack-api.js";
+import type { EscalationRecord } from "./types.js";
 
 type Payload = Record<string, unknown>;
 
@@ -26,6 +27,44 @@ function viewButton(label: string, url: string): Record<string, unknown> {
     url,
   };
 }
+
+// --- Block formatting helpers ---
+
+export function formatAsBlocks(text: string, toolName?: string): SlackBlock[] {
+  const blocks: SlackBlock[] = [];
+
+  if (toolName) {
+    blocks.push({
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: `Tool: \`${toolName}\`` },
+      ],
+    });
+  }
+
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.startsWith("```") && trimmed.endsWith("```")) {
+      const inner = trimmed.slice(3, -3).replace(/^\w*\n/, "");
+      blocks.push({
+        type: "section",
+        text: { type: "mrkdwn", text: `\`\`\`${inner}\`\`\`` },
+      });
+    } else {
+      blocks.push({
+        type: "section",
+        text: { type: "mrkdwn", text: trimmed },
+      });
+    }
+  }
+
+  return blocks;
+}
+
+// --- Event formatters ---
 
 export function formatIssueCreated(event: PluginEvent): SlackMessage {
   const p = event.payload as Payload;
@@ -308,6 +347,123 @@ export function formatDailyDigest(stats: {
       {
         type: "context",
         elements: [{ type: "mrkdwn", text: "Paperclip - Daily Digest" }],
+      },
+    ],
+  };
+}
+
+// --- Escalation formatters ---
+
+export function formatEscalationMessage(escalation: EscalationRecord): SlackMessage {
+  const blocks: Array<Record<string, unknown>> = [];
+
+  blocks.push({
+    type: "header",
+    text: { type: "plain_text", text: `Escalation from ${escalation.agentName ?? "Agent"}` },
+  });
+
+  const fields: Array<{ type: string; text: string }> = [
+    { type: "mrkdwn", text: `*Reason*\n${escalation.reason}` },
+  ];
+  if (escalation.confidence != null) {
+    fields.push({ type: "mrkdwn", text: `*Confidence*\n${escalation.confidence}` });
+  }
+  blocks.push({ type: "section", fields });
+
+  if (escalation.conversationHistory && escalation.conversationHistory.length > 0) {
+    const lastMessages = escalation.conversationHistory.slice(-5);
+    const historyText = lastMessages
+      .map((msg) => `${msg.role}: ${msg.text}`)
+      .join("\n");
+    blocks.push({
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: `*Recent conversation*\n${historyText.slice(0, 2000)}` },
+      ],
+    });
+  }
+
+  if (escalation.agentReasoning) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Agent reasoning*\n${escalation.agentReasoning}`,
+      },
+    });
+  }
+
+  if (escalation.suggestedReply) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Suggested reply*\n> ${escalation.suggestedReply}`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Use Suggested Reply" },
+        style: "primary",
+        action_id: "escalation_use_suggested",
+        value: escalation.id,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Reply to Customer" },
+        action_id: "escalation_reply",
+        value: escalation.id,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Override Agent" },
+        action_id: "escalation_override",
+        value: escalation.id,
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Dismiss" },
+        style: "danger",
+        action_id: "escalation_dismiss",
+        value: escalation.id,
+      },
+    ],
+  });
+
+  return {
+    text: `Escalation from ${escalation.agentName ?? "Agent"}: ${escalation.reason}`,
+    blocks,
+  };
+}
+
+export function formatEscalationResolved(
+  escalationId: string,
+  action: string,
+  userId: string,
+): SlackMessage {
+  const emoji = action === "dismiss" || action === "escalation_dismiss" ? ":x:" : ":white_check_mark:";
+  const label = action === "escalation_use_suggested"
+    ? "Used suggested reply"
+    : action === "escalation_override"
+      ? "Overrode agent"
+      : action === "escalation_dismiss"
+        ? "Dismissed"
+        : "Replied";
+
+  return {
+    text: `Escalation ${label} by ${userId}`,
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `${emoji} *Escalation ${label}* by <@${userId}>`,
+        },
       },
     ],
   };

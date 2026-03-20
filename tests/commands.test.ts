@@ -1,8 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-
-// We test the slash command logic by importing the worker and simulating webhook calls.
-// Since the worker uses module-scoped state, we test the parseSlashCommand and command
-// formatting logic via the exported plugin's onWebhook handler.
+import { describe, it, expect } from "vitest";
 
 describe("slash command parsing", () => {
   function parseSlashCommand(rawBody: string) {
@@ -13,6 +9,7 @@ describe("slash command parsing", () => {
       responseUrl: params.get("response_url") ?? "",
       userId: params.get("user_id") ?? "",
       channelId: params.get("channel_id") ?? "",
+      threadTs: params.get("thread_ts") ?? "",
     };
   }
 
@@ -61,6 +58,29 @@ describe("slash command parsing", () => {
     const subcommand = result.text.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
     expect(subcommand).toBe("foobar");
     expect(["status", "help", "agents", "issues", "approve"]).not.toContain(subcommand);
+  });
+
+  it("parses acp spawn command", () => {
+    const raw = "command=%2Fclip&text=acp+spawn+builder+Builder&response_url=https%3A%2F%2Fhooks.slack.com%2Factions&channel_id=C123&thread_ts=1234.5678";
+    const result = parseSlashCommand(raw);
+    const parts = result.text.trim().split(/\s+/);
+    expect(parts[0]).toBe("acp");
+    expect(parts[1]).toBe("spawn");
+    expect(parts[2]).toBe("builder");
+    expect(parts[3]).toBe("Builder");
+    expect(result.threadTs).toBe("1234.5678");
+  });
+
+  it("parses commands subcommand", () => {
+    const raw = "command=%2Fclip&text=commands&response_url=https%3A%2F%2Fhooks.slack.com%2Factions";
+    const result = parseSlashCommand(raw);
+    expect(result.text).toBe("commands");
+  });
+
+  it("parses watches subcommand", () => {
+    const raw = "command=%2Fclip&text=watches&response_url=https%3A%2F%2Fhooks.slack.com%2Factions";
+    const result = parseSlashCommand(raw);
+    expect(result.text).toBe("watches");
   });
 });
 

@@ -1,109 +1,24 @@
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { SlackBlock, SlackMessage } from "./slack-api.js";
+import type { SessionEntry, DiscussionLoop, QueuedOutput } from "./types.js";
 import { postMessage } from "./slack-api.js";
-import { DEFAULT_CONFIG } from "./constants.js";
+import { formatAsBlocks } from "./formatters.js";
+import { STATE_KEYS, DEFAULT_CONFIG, PLUGIN_ID } from "./constants.js";
 
-type AcpPayload = Record<string, unknown>;
-
-const ACP_BIND_PREFIX = "acp-bind-";
-const SESSIONS_PREFIX = "sessions_";
-const OUTPUT_QUEUE_PREFIX = "output-queue_";
-const DISCUSSION_PREFIX = "discussion_";
-
-// --- Session types ---
-
-export interface AgentSession {
-  sessionId: string;
-  agentName: string;
-  agentDisplayName: string;
-  spawnedAt: string;
-  status: "active" | "closed";
-  lastActivityAt: string;
-}
-
-export interface DiscussionLoop {
-  id: string;
-  channelId: string;
-  threadTs: string;
-  initiatorAgent: string;
-  targetAgent: string;
-  reason: string;
-  turns: number;
-  maxTurns: number;
-  status: "active" | "paused" | "completed" | "stale";
-  lastTurnAt: string;
-  createdAt: string;
-}
-
-// --- Formatting ---
-
-export function formatAsBlocks(text: string, toolName?: string): SlackBlock[] {
-  const blocks: SlackBlock[] = [];
-
-  if (toolName) {
-    blocks.push({
-      type: "context",
-      elements: [
-        { type: "mrkdwn", text: `Tool: \`${toolName}\`` },
-      ],
-    });
-  }
-
-  // Split on fenced code blocks to render them separately
-  const parts = text.split(/(```[\s\S]*?```)/g);
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-
-    if (trimmed.startsWith("```") && trimmed.endsWith("```")) {
-      const inner = trimmed.slice(3, -3).replace(/^\w*\n/, "");
-      blocks.push({
-        type: "section",
-        text: { type: "mrkdwn", text: `\`\`\`${inner}\`\`\`` },
-      });
-    } else {
-      blocks.push({
-        type: "section",
-        text: { type: "mrkdwn", text: trimmed },
-      });
-    }
-  }
-
-  return blocks;
-}
-
-// --- State key helpers ---
-
-function bindingKey(channel: string, threadTs: string): string {
-  return `${ACP_BIND_PREFIX}${channel}-${threadTs}`;
-}
-
-function sessionsKey(channelId: string, threadTs: string): string {
-  return `${SESSIONS_PREFIX}${channelId}_${threadTs}`;
-}
-
-function outputQueueKey(channelId: string, threadTs: string): string {
-  return `${OUTPUT_QUEUE_PREFIX}${channelId}_${threadTs}`;
-}
-
-function discussionKey(id: string): string {
-  return `${DISCUSSION_PREFIX}${id}`;
-}
-
-// --- Session helpers ---
+// --- Session registry (uses ctx.agents.sessions for native, state for ACP) ---
 
 async function getSessions(
   ctx: PluginContext,
   companyId: string,
   channelId: string,
   threadTs: string,
-): Promise<AgentSession[]> {
+): Promise<SessionEntry[]> {
   const raw = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
-    stateKey: sessionsKey(channelId, threadTs),
+    stateKey: STATE_KEYS.sessionRegistry(channelId, threadTs),
   });
-  if (Array.isArray(raw)) return raw as AgentSession[];
+  if (Array.isArray(raw)) return raw as SessionEntry[];
   return [];
 }
 
@@ -112,15 +27,15 @@ async function setSessions(
   companyId: string,
   channelId: string,
   threadTs: string,
-  sessions: AgentSession[],
+  sessions: SessionEntry[],
 ): Promise<void> {
   await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: sessionsKey(channelId, threadTs) },
+    { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.sessionRegistry(channelId, threadTs) },
     sessions,
   );
 }
 
-function findMostRecentActive(sessions: AgentSession[]): AgentSession | undefined {
+function findMostRecentActive(sessions: SessionEntry[]): SessionEntry | undefined {
   const active = sessions.filter((s) => s.status === "active");
   if (active.length === 0) return undefined;
   return active.sort(
@@ -143,6 +58,108 @@ async function touchSession(
   }
 }
 
+// --- Spawn agent: native sessions first, ACP fallback ---
+
+export async function spawnAgent(
+  ctx: PluginContext,
+  companyId: string,
+  channelId: string,
+  threadTs: string,
+  agentId: string,
+  displayName: string,
+  reason?: string,
+): Promise<SessionEntry | null> {
+  const sessions = await getSessions(ctx, companyId, channelId, threadTs);
+  const activeSessions = sessions.filter((s) => s.status === "active");
+  const maxAgents = DEFAULT_CONFIG.maxAgentsPerThread;
+
+  if (activeSessions.length >= maxAgents) {
+    ctx.logger.warn("Max agents per thread reached", { channelId, threadTs, max: maxAgents });
+    return null;
+  }
+
+  const existing = activeSessions.find((s) => s.agentName === agentId);
+  if (existing) {
+    ctx.logger.warn("Agent already active in thread", { agentName: agentId });
+    return existing;
+  }
+
+  const taskKey = `slack-${channelId}-${threadTs}`;
+  let transport: "native" | "acp" = "acp";
+  let sessionId = `acp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    // Try native agent session first
+    const nativeSession = await ctx.agents.sessions.create(agentId, companyId, {
+      taskKey,
+      reason: reason ?? `Spawned in Slack thread ${channelId}/${threadTs}`,
+    });
+    sessionId = nativeSession.id;
+    transport = "native";
+    ctx.logger.info("Native agent session created", { agentId, sessionId });
+  } catch (err) {
+    // Fallback to ACP
+    ctx.logger.info("Native session failed, falling back to ACP", { agentId, err });
+    ctx.events.emit("acp-spawn", companyId, {
+      agentId,
+      channelId,
+      threadTs,
+      taskKey,
+      reason: reason ?? `Spawned in Slack thread`,
+    });
+  }
+
+  const now = new Date().toISOString();
+  const entry: SessionEntry = {
+    sessionId,
+    agentId,
+    agentName: agentId,
+    agentDisplayName: displayName,
+    transport,
+    status: "active",
+    spawnedAt: now,
+    lastActivityAt: now,
+  };
+
+  sessions.push(entry);
+  await setSessions(ctx, companyId, channelId, threadTs, sessions);
+  return entry;
+}
+
+export async function closeAgent(
+  ctx: PluginContext,
+  companyId: string,
+  channelId: string,
+  threadTs: string,
+  agentName?: string,
+): Promise<SessionEntry | null> {
+  const sessions = await getSessions(ctx, companyId, channelId, threadTs);
+
+  let target: SessionEntry | undefined;
+  if (agentName) {
+    target = sessions.find(
+      (s) => s.status === "active" && s.agentName.toLowerCase() === agentName.toLowerCase(),
+    );
+  } else {
+    target = findMostRecentActive(sessions);
+  }
+
+  if (!target) return null;
+
+  // Close native session if applicable
+  if (target.transport === "native") {
+    try {
+      await ctx.agents.sessions.close(target.sessionId, companyId);
+    } catch (err) {
+      ctx.logger.warn("Failed to close native session", { sessionId: target.sessionId, err });
+    }
+  }
+
+  target.status = "closed";
+  await setSessions(ctx, companyId, channelId, threadTs, sessions);
+  return target;
+}
+
 // --- Message routing ---
 
 function parseAtMention(text: string): string | null {
@@ -157,12 +174,12 @@ async function resolveTargetAgent(
   threadTs: string,
   text: string,
   replyToAgentName?: string,
-): Promise<AgentSession | undefined> {
+): Promise<SessionEntry | undefined> {
   const sessions = await getSessions(ctx, companyId, channelId, threadTs);
   const active = sessions.filter((s) => s.status === "active");
   if (active.length === 0) return undefined;
 
-  // 1. Check @mention
+  // 1. @mention
   const mentioned = parseAtMention(text);
   if (mentioned) {
     const match = active.find(
@@ -171,25 +188,88 @@ async function resolveTargetAgent(
     if (match) return match;
   }
 
-  // 2. Check reply-to agent
+  // 2. Reply-to agent
   if (replyToAgentName) {
     const match = active.find((s) => s.agentName === replyToAgentName);
     if (match) return match;
   }
 
-  // 3. Fallback: most recently active
+  // 3. Most recently active
   return findMostRecentActive(active);
 }
 
-// --- Output sequencing ---
+// --- Route inbound message to the right agent ---
 
-interface QueuedOutput {
-  agentName: string;
-  agentDisplayName: string;
-  text: string;
-  toolName?: string;
-  queuedAt: string;
+export async function routeMessageToAgent(
+  ctx: PluginContext,
+  companyId: string,
+  channel: string,
+  threadTs: string,
+  text: string,
+  replyToMessageTs?: string,
+): Promise<boolean> {
+  const sessions = await getSessions(ctx, companyId, channel, threadTs);
+  const activeSessions = sessions.filter((s) => s.status === "active");
+
+  if (activeSessions.length === 0) return false;
+
+  let replyToAgentName: string | undefined;
+  if (replyToMessageTs) {
+    const agentNameForMsg = await ctx.state.get({
+      scopeKind: "company",
+      scopeId: companyId,
+      stateKey: STATE_KEYS.msgAgent(channel, replyToMessageTs),
+    });
+    if (agentNameForMsg) {
+      replyToAgentName = String(agentNameForMsg);
+    }
+  }
+
+  const target = await resolveTargetAgent(ctx, companyId, channel, threadTs, text, replyToAgentName);
+  if (!target) return false;
+
+  await touchSession(ctx, companyId, channel, threadTs, target.agentName);
+
+  if (target.transport === "native") {
+    // Use native session messaging - real SDK API
+    await ctx.agents.sessions.sendMessage(target.sessionId, companyId, {
+      prompt: text,
+      reason: `Slack message in ${channel}/${threadTs}`,
+      onEvent: (event: { type: string; data?: unknown }) => {
+        if (event.type === "text" && event.data) {
+          // Streaming output handled via event listener
+          ctx.events.emit("agent-stream-chunk", companyId, {
+            agentName: target.agentName,
+            agentDisplayName: target.agentDisplayName,
+            sessionId: target.sessionId,
+            channel,
+            threadTs,
+            text: String(event.data),
+          });
+        }
+      },
+    });
+  } else {
+    // ACP fallback
+    ctx.events.emit("acp-message", companyId, {
+      agentId: target.agentName,
+      sessionId: target.sessionId,
+      channel,
+      threadTs,
+      text,
+    });
+  }
+
+  ctx.logger.info("Routed message to agent", {
+    agentId: target.agentName,
+    transport: target.transport,
+    channel,
+    threadTs,
+  });
+  return true;
 }
+
+// --- Output sequencing ---
 
 const activeSpeakers = new Map<string, string>();
 
@@ -200,7 +280,7 @@ async function enqueueOutput(
   threadTs: string,
   output: QueuedOutput,
 ): Promise<void> {
-  const key = outputQueueKey(channelId, threadTs);
+  const key = STATE_KEYS.outputQueue(channelId, threadTs);
   const raw = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
@@ -224,7 +304,7 @@ async function drainOutputQueue(
   const lockKey = `${channelId}_${threadTs}`;
   if (activeSpeakers.has(lockKey)) return;
 
-  const key = outputQueueKey(channelId, threadTs);
+  const key = STATE_KEYS.outputQueue(channelId, threadTs);
 
   while (true) {
     const raw = await ctx.state.get({
@@ -263,7 +343,7 @@ async function drainOutputQueue(
         {
           scopeKind: "company",
           scopeId: companyId,
-          stateKey: `msg-agent-${channelId}-${result.ts}`,
+          stateKey: STATE_KEYS.msgAgent(channelId, result.ts),
         },
         item.agentName,
       );
@@ -273,283 +353,41 @@ async function drainOutputQueue(
   }
 }
 
-// --- Slash commands ---
+// --- Handle agent output (from native onEvent or ACP events) ---
 
-export async function handleAcpSlashCommand(
-  ctx: PluginContext,
-  payload: { channel: string; threadTs: string; text: string; companyId: string },
-): Promise<void> {
-  const subArgs = payload.text.trim().split(/\s+/);
-  const sub = subArgs[0]?.toLowerCase() ?? "";
-
-  // Legacy bind/unbind (single agent)
-  if (sub === "bind") {
-    const agentId = subArgs[1];
-    if (!agentId) {
-      ctx.logger.warn("acp bind requires an agent ID");
-      return;
-    }
-
-    await ctx.state.set(
-      {
-        scopeKind: "company",
-        scopeId: payload.companyId,
-        stateKey: bindingKey(payload.channel, payload.threadTs),
-      },
-      agentId,
-    );
-    ctx.logger.info("ACP session bound", {
-      channel: payload.channel,
-      threadTs: payload.threadTs,
-      agentId,
-    });
-    return;
-  }
-
-  if (sub === "unbind") {
-    await ctx.state.set(
-      {
-        scopeKind: "company",
-        scopeId: payload.companyId,
-        stateKey: bindingKey(payload.channel, payload.threadTs),
-      },
-      null,
-    );
-    ctx.logger.info("ACP session unbound", {
-      channel: payload.channel,
-      threadTs: payload.threadTs,
-    });
-    return;
-  }
-
-  // Multi-agent: spawn
-  if (sub === "spawn") {
-    const agentName = subArgs[1];
-    if (!agentName) {
-      ctx.logger.warn("acp spawn requires an agent name");
-      return;
-    }
-
-    const displayName = subArgs[2] ?? agentName;
-    const sessions = await getSessions(ctx, payload.companyId, payload.channel, payload.threadTs);
-    const maxAgents = DEFAULT_CONFIG.maxAgentsPerThread;
-
-    const activeSessions = sessions.filter((s) => s.status === "active");
-    if (activeSessions.length >= maxAgents) {
-      ctx.logger.warn("Max agents per thread reached", {
-        channel: payload.channel,
-        threadTs: payload.threadTs,
-        max: maxAgents,
-      });
-      return;
-    }
-
-    const existing = activeSessions.find((s) => s.agentName === agentName);
-    if (existing) {
-      ctx.logger.warn("Agent already active in thread", { agentName });
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const session: AgentSession = {
-      sessionId: `acp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      agentName,
-      agentDisplayName: displayName,
-      spawnedAt: now,
-      status: "active",
-      lastActivityAt: now,
-    };
-
-    sessions.push(session);
-    await setSessions(ctx, payload.companyId, payload.channel, payload.threadTs, sessions);
-
-    ctx.logger.info("ACP agent spawned", {
-      channel: payload.channel,
-      threadTs: payload.threadTs,
-      agentName,
-      sessionId: session.sessionId,
-    });
-    return;
-  }
-
-  // Multi-agent: status
-  if (sub === "status") {
-    const sessions = await getSessions(ctx, payload.companyId, payload.channel, payload.threadTs);
-    const active = sessions.filter((s) => s.status === "active");
-
-    if (active.length === 0) {
-      ctx.logger.info("No active agents in thread", {
-        channel: payload.channel,
-        threadTs: payload.threadTs,
-      });
-      return;
-    }
-
-    const lines = active.map((s) => {
-      const age = Math.round((Date.now() - new Date(s.lastActivityAt).getTime()) / 1000);
-      return `:large_green_circle: *${s.agentDisplayName}* (\`${s.agentName}\`) - last active ${age}s ago`;
-    });
-
-    await postMessage(
-      ctx,
-      await resolveToken(ctx),
-      payload.channel,
-      {
-        text: `${active.length} active agent(s) in thread`,
-        blocks: [
-          {
-            type: "header",
-            text: { type: "plain_text", text: `Active Agents (${active.length})` },
-          },
-          {
-            type: "section",
-            text: { type: "mrkdwn", text: lines.join("\n") },
-          },
-        ],
-      },
-      payload.threadTs ? { threadTs: payload.threadTs } : undefined,
-    );
-    return;
-  }
-
-  // Multi-agent: close
-  if (sub === "close") {
-    const targetName = subArgs[1]?.toLowerCase();
-    const sessions = await getSessions(ctx, payload.companyId, payload.channel, payload.threadTs);
-
-    let target: AgentSession | undefined;
-    if (targetName) {
-      target = sessions.find(
-        (s) => s.status === "active" && s.agentName.toLowerCase() === targetName,
-      );
-    } else {
-      target = findMostRecentActive(sessions);
-    }
-
-    if (!target) {
-      ctx.logger.warn("No matching agent to close", { targetName });
-      return;
-    }
-
-    target.status = "closed";
-    await setSessions(ctx, payload.companyId, payload.channel, payload.threadTs, sessions);
-
-    ctx.logger.info("ACP agent closed", {
-      channel: payload.channel,
-      threadTs: payload.threadTs,
-      agentName: target.agentName,
-    });
-    return;
-  }
-
-  ctx.logger.warn("Unknown /acp subcommand", { sub });
-}
-
-// --- Message routing (multi-agent aware) ---
-
-export async function routeMessageToAcp(
-  ctx: PluginContext,
-  companyId: string,
-  channel: string,
-  threadTs: string,
-  text: string,
-  replyToMessageTs?: string,
-): Promise<boolean> {
-  // Try multi-agent sessions first
-  const sessions = await getSessions(ctx, companyId, channel, threadTs);
-  const activeSessions = sessions.filter((s) => s.status === "active");
-
-  if (activeSessions.length > 0) {
-    let replyToAgentName: string | undefined;
-    if (replyToMessageTs) {
-      const agentNameForMsg = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: companyId,
-        stateKey: `msg-agent-${channel}-${replyToMessageTs}`,
-      });
-      if (agentNameForMsg) {
-        replyToAgentName = String(agentNameForMsg);
-      }
-    }
-
-    const target = await resolveTargetAgent(ctx, companyId, channel, threadTs, text, replyToAgentName);
-    if (target) {
-      await touchSession(ctx, companyId, channel, threadTs, target.agentName);
-
-      ctx.events.emit("acp:message", {
-        agentId: target.agentName,
-        sessionId: target.sessionId,
-        channel,
-        threadTs,
-        text,
-        companyId,
-      });
-
-      ctx.logger.info("Routed message to ACP agent (multi-agent)", {
-        agentId: target.agentName,
-        channel,
-        threadTs,
-      });
-      return true;
-    }
-  }
-
-  // Fallback to legacy single-agent binding
-  const agentId = await ctx.state.get({
-    scopeKind: "company",
-    scopeId: companyId,
-    stateKey: bindingKey(channel, threadTs),
-  });
-
-  if (!agentId) return false;
-
-  ctx.events.emit("acp:message", {
-    agentId: String(agentId),
-    channel,
-    threadTs,
-    text,
-    companyId,
-  });
-
-  ctx.logger.info("Routed message to ACP agent", {
-    agentId: String(agentId),
-    channel,
-    threadTs,
-  });
-  return true;
-}
-
-// --- Output handling (multi-agent with sequencing) ---
-
-export async function handleAcpOutput(
+export async function handleAgentOutput(
   ctx: PluginContext,
   token: string,
-  event: PluginEvent,
+  companyId: string,
+  payload: {
+    channel: string;
+    threadTs: string;
+    text: string;
+    agentName?: string;
+    agentDisplayName?: string;
+    toolName?: string;
+  },
 ): Promise<void> {
-  const p = event.payload as AcpPayload;
-  const channel = String(p.channel ?? "");
-  const threadTs = String(p.threadTs ?? "");
-  const text = String(p.text ?? "");
-  const toolName = p.toolName != null ? String(p.toolName) : undefined;
-  const agentName = p.agentName != null ? String(p.agentName) : undefined;
+  const { channel, threadTs, text, toolName } = payload;
+  const agentName = payload.agentName;
+  const agentDisplayName = payload.agentDisplayName;
 
   if (!channel || !threadTs) {
-    ctx.logger.warn("acp:output missing channel or threadTs", { channel, threadTs });
+    ctx.logger.warn("Agent output missing channel or threadTs", { channel, threadTs });
     return;
   }
 
-  // Check if this thread has multi-agent sessions
-  const sessions = await getSessions(ctx, event.companyId, channel, threadTs);
+  const sessions = await getSessions(ctx, companyId, channel, threadTs);
   const activeSessions = sessions.filter((s) => s.status === "active");
 
   if (activeSessions.length > 1 && agentName) {
     // Multi-agent: queue output for sequenced delivery
     const session = activeSessions.find((s) => s.agentName === agentName);
-    const displayName = session?.agentDisplayName ?? agentName;
+    const displayName = agentDisplayName ?? session?.agentDisplayName ?? agentName;
 
-    await touchSession(ctx, event.companyId, channel, threadTs, agentName);
+    await touchSession(ctx, companyId, channel, threadTs, agentName);
 
-    await enqueueOutput(ctx, event.companyId, channel, threadTs, {
+    await enqueueOutput(ctx, companyId, channel, threadTs, {
       agentName,
       agentDisplayName: displayName,
       text,
@@ -557,14 +395,14 @@ export async function handleAcpOutput(
       queuedAt: new Date().toISOString(),
     });
 
-    await drainOutputQueue(ctx, token, event.companyId, channel, threadTs);
+    await drainOutputQueue(ctx, token, companyId, channel, threadTs);
   } else {
     // Single agent or legacy: post directly with optional label
     const blocks: SlackBlock[] = [];
 
     if (agentName && activeSessions.length > 0) {
       const session = activeSessions.find((s) => s.agentName === agentName);
-      const displayName = session?.agentDisplayName ?? agentName;
+      const displayName = agentDisplayName ?? session?.agentDisplayName ?? agentName;
       blocks.push({
         type: "context",
         elements: [
@@ -572,7 +410,7 @@ export async function handleAcpOutput(
         ],
       });
 
-      await touchSession(ctx, event.companyId, channel, threadTs, agentName);
+      await touchSession(ctx, companyId, channel, threadTs, agentName);
     }
 
     blocks.push(...formatAsBlocks(text, toolName));
@@ -588,25 +426,25 @@ export async function handleAcpOutput(
         await ctx.state.set(
           {
             scopeKind: "company",
-            scopeId: event.companyId,
-            stateKey: `msg-agent-${channel}-${result.ts}`,
+            scopeId: companyId,
+            stateKey: STATE_KEYS.msgAgent(channel, result.ts),
           },
           agentName,
         );
       }
 
       await ctx.activity.log({
-        companyId: event.companyId,
-        message: "Posted ACP agent output to Slack thread",
+        companyId,
+        message: "Posted agent output to Slack thread",
         entityType: "plugin",
-        entityId: event.entityId,
+        entityId: PLUGIN_ID,
       });
     }
   }
 
-  // Check if output is part of a discussion loop
+  // Advance discussion loop if applicable
   if (agentName) {
-    await advanceDiscussionLoop(ctx, token, event.companyId, channel, threadTs, agentName, text);
+    await advanceDiscussionLoop(ctx, token, companyId, channel, threadTs, agentName, text);
   }
 }
 
@@ -648,60 +486,18 @@ export function buildHandoffBlocks(
   ];
 }
 
-export async function handleHandoffTool(
-  ctx: PluginContext,
-  token: string,
-  params: Record<string, unknown>,
-): Promise<{ handoffId: string; status: string }> {
-  const fromAgent = String(params.fromAgent ?? "");
-  const toAgent = String(params.toAgent ?? "");
-  const reason = String(params.reason ?? "");
-  const channelId = String(params.channelId ?? "");
-  const threadTs = String(params.threadTs ?? "");
-  const companyId = String(params.companyId ?? "");
-  const context = params.context != null ? String(params.context) : undefined;
-
-  const handoffId = `hoff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-  await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: `handoff-${handoffId}` },
-    {
-      id: handoffId,
-      fromAgent,
-      toAgent,
-      reason,
-      context,
-      channelId,
-      threadTs,
-      companyId,
-      status: "pending",
-      createdAt: new Date().toISOString(),
-    },
-  );
-
-  const blocks = buildHandoffBlocks(fromAgent, toAgent, reason, handoffId);
-  await postMessage(ctx, token, channelId, {
-    text: `Handoff: ${fromAgent} -> ${toAgent}: ${reason}`,
-    blocks,
-  }, threadTs ? { threadTs } : undefined);
-
-  return { handoffId, status: "pending" };
-}
-
 export async function handleHandoffAction(
   ctx: PluginContext,
   token: string,
+  companyId: string,
   handoffId: string,
   approved: boolean,
   userId: string,
 ): Promise<void> {
-  const companies = await ctx.companies.list({ limit: 1, offset: 0 });
-  const companyId = companies[0]?.id ?? "";
-
   const raw = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
-    stateKey: `handoff-${handoffId}`,
+    stateKey: STATE_KEYS.handoff(handoffId),
   }) as Record<string, unknown> | null;
 
   if (!raw) {
@@ -711,7 +507,7 @@ export async function handleHandoffAction(
 
   const status = approved ? "approved" : "rejected";
   await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: `handoff-${handoffId}` },
+    { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.handoff(handoffId) },
     { ...raw, status, resolvedBy: `slack:${userId}`, resolvedAt: new Date().toISOString() },
   );
 
@@ -722,15 +518,25 @@ export async function handleHandoffAction(
     const fromAgent = String(raw.fromAgent ?? "");
     const context = raw.context != null ? String(raw.context) : undefined;
 
-    ctx.events.emit("acp:message", {
-      agentId: toAgent,
-      channel: channelId,
-      threadTs,
-      text: context ?? `Handoff from ${fromAgent}: ${String(raw.reason ?? "")}`,
-      companyId,
-      handoffId,
-      fromAgent,
-    });
+    // Try to route via native session
+    const sessions = await getSessions(ctx, companyId, channelId, threadTs);
+    const targetSession = sessions.find((s) => s.agentName === toAgent && s.status === "active");
+
+    if (targetSession && targetSession.transport === "native") {
+      await ctx.agents.sessions.sendMessage(targetSession.sessionId, companyId, {
+        prompt: context ?? `Handoff from ${fromAgent}: ${String(raw.reason ?? "")}`,
+        reason: `Handoff from ${fromAgent}`,
+      });
+    } else {
+      ctx.events.emit("acp-message", companyId, {
+        agentId: toAgent,
+        channel: channelId,
+        threadTs,
+        text: context ?? `Handoff from ${fromAgent}: ${String(raw.reason ?? "")}`,
+        handoffId,
+        fromAgent,
+      });
+    }
 
     ctx.logger.info("Handoff approved, message sent to target agent", {
       handoffId,
@@ -742,21 +548,22 @@ export async function handleHandoffAction(
   await ctx.metrics.write("slack.handoffs.resolved", 1, { decision: status });
 }
 
-// --- Discussion loop tool ---
+// --- Discussion loop ---
 
-export async function handleDiscussWithAgentTool(
+export async function startDiscussion(
   ctx: PluginContext,
   token: string,
-  params: Record<string, unknown>,
+  companyId: string,
+  params: {
+    initiatorAgent: string;
+    targetAgent: string;
+    topic: string;
+    channelId: string;
+    threadTs: string;
+    maxTurns: number;
+  },
 ): Promise<{ discussionId: string; status: string }> {
-  const initiatorAgent = String(params.initiatorAgent ?? "");
-  const targetAgent = String(params.targetAgent ?? "");
-  const topic = String(params.topic ?? "");
-  const channelId = String(params.channelId ?? "");
-  const threadTs = String(params.threadTs ?? "");
-  const companyId = String(params.companyId ?? "");
-  const maxTurns = Number(params.maxTurns ?? 10);
-
+  const { initiatorAgent, targetAgent, topic, channelId, threadTs, maxTurns } = params;
   const discussionId = `disc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   const loop: DiscussionLoop = {
@@ -774,17 +581,15 @@ export async function handleDiscussWithAgentTool(
   };
 
   await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: discussionKey(discussionId) },
+    { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.discussion(discussionId) },
     loop,
   );
 
-  // Track active discussion in thread
   await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: `active-discussion-${channelId}-${threadTs}` },
+    { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.activeDiscussion(channelId, threadTs) },
     discussionId,
   );
 
-  // Post initial message
   await postMessage(ctx, token, channelId, {
     text: `Discussion started: ${initiatorAgent} <-> ${targetAgent}: ${topic}`,
     blocks: [
@@ -801,16 +606,25 @@ export async function handleDiscussWithAgentTool(
     ],
   }, threadTs ? { threadTs } : undefined);
 
-  // Kick off: send topic to target agent
-  ctx.events.emit("acp:message", {
-    agentId: targetAgent,
-    channel: channelId,
-    threadTs,
-    text: `[Discussion with ${initiatorAgent}] ${topic}`,
-    companyId,
-    discussionId,
-    fromAgent: initiatorAgent,
-  });
+  // Kick off: send topic to target agent via native or ACP
+  const sessions = await getSessions(ctx, companyId, channelId, threadTs);
+  const targetSession = sessions.find((s) => s.agentName === targetAgent && s.status === "active");
+
+  if (targetSession && targetSession.transport === "native") {
+    await ctx.agents.sessions.sendMessage(targetSession.sessionId, companyId, {
+      prompt: `[Discussion with ${initiatorAgent}] ${topic}`,
+      reason: `Discussion: ${topic}`,
+    });
+  } else {
+    ctx.events.emit("acp-message", companyId, {
+      agentId: targetAgent,
+      channel: channelId,
+      threadTs,
+      text: `[Discussion with ${initiatorAgent}] ${topic}`,
+      discussionId,
+      fromAgent: initiatorAgent,
+    });
+  }
 
   return { discussionId, status: "active" };
 }
@@ -827,14 +641,14 @@ async function advanceDiscussionLoop(
   const activeDiscId = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
-    stateKey: `active-discussion-${channelId}-${threadTs}`,
+    stateKey: STATE_KEYS.activeDiscussion(channelId, threadTs),
   });
   if (!activeDiscId) return;
 
   const raw = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
-    stateKey: discussionKey(String(activeDiscId)),
+    stateKey: STATE_KEYS.discussion(String(activeDiscId)),
   }) as DiscussionLoop | null;
 
   if (!raw || raw.status !== "active") return;
@@ -843,15 +657,14 @@ async function advanceDiscussionLoop(
   loop.turns += 1;
   loop.lastTurnAt = new Date().toISOString();
 
-  // Check max turns
   if (loop.turns >= loop.maxTurns) {
     loop.status = "completed";
     await ctx.state.set(
-      { scopeKind: "company", scopeId: companyId, stateKey: discussionKey(loop.id) },
+      { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.discussion(loop.id) },
       loop,
     );
     await ctx.state.set(
-      { scopeKind: "company", scopeId: companyId, stateKey: `active-discussion-${channelId}-${threadTs}` },
+      { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.activeDiscussion(channelId, threadTs) },
       null,
     );
 
@@ -871,17 +684,17 @@ async function advanceDiscussionLoop(
     return;
   }
 
-  // Check for stale loop (no activity for 5 minutes)
+  // Stale check (5 min)
   const staleCutoff = Date.now() - 5 * 60 * 1000;
   const lastTurn = new Date(loop.lastTurnAt).getTime();
   if (lastTurn < staleCutoff) {
     loop.status = "stale";
     await ctx.state.set(
-      { scopeKind: "company", scopeId: companyId, stateKey: discussionKey(loop.id) },
+      { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.discussion(loop.id) },
       loop,
     );
     await ctx.state.set(
-      { scopeKind: "company", scopeId: companyId, stateKey: `active-discussion-${channelId}-${threadTs}` },
+      { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.activeDiscussion(channelId, threadTs) },
       null,
     );
 
@@ -899,11 +712,11 @@ async function advanceDiscussionLoop(
     return;
   }
 
-  // Route to the other agent
+  // Route to other agent
   const nextAgent = agentName === loop.initiatorAgent ? loop.targetAgent : loop.initiatorAgent;
 
   await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: discussionKey(loop.id) },
+    { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.discussion(loop.id) },
     loop,
   );
 
@@ -911,7 +724,7 @@ async function advanceDiscussionLoop(
   if (loop.turns % 5 === 0) {
     loop.status = "paused";
     await ctx.state.set(
-      { scopeKind: "company", scopeId: companyId, stateKey: discussionKey(loop.id) },
+      { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.discussion(loop.id) },
       loop,
     );
 
@@ -949,31 +762,39 @@ async function advanceDiscussionLoop(
     return;
   }
 
-  ctx.events.emit("acp:message", {
-    agentId: nextAgent,
-    channel: channelId,
-    threadTs,
-    text: `[Discussion with ${agentName}] ${text}`,
-    companyId,
-    discussionId: loop.id,
-    fromAgent: agentName,
-  });
+  // Send to next agent via native or ACP
+  const sessions = await getSessions(ctx, companyId, channelId, threadTs);
+  const nextSession = sessions.find((s) => s.agentName === nextAgent && s.status === "active");
+
+  if (nextSession && nextSession.transport === "native") {
+    await ctx.agents.sessions.sendMessage(nextSession.sessionId, companyId, {
+      prompt: `[Discussion with ${agentName}] ${text}`,
+      reason: `Discussion turn ${loop.turns}`,
+    });
+  } else {
+    ctx.events.emit("acp-message", companyId, {
+      agentId: nextAgent,
+      channel: channelId,
+      threadTs,
+      text: `[Discussion with ${agentName}] ${text}`,
+      discussionId: loop.id,
+      fromAgent: agentName,
+    });
+  }
 }
 
 export async function handleDiscussionAction(
   ctx: PluginContext,
   token: string,
+  companyId: string,
   discussionId: string,
   action: "continue" | "stop",
   userId: string,
 ): Promise<void> {
-  const companies = await ctx.companies.list({ limit: 1, offset: 0 });
-  const companyId = companies[0]?.id ?? "";
-
   const raw = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
-    stateKey: discussionKey(discussionId),
+    stateKey: STATE_KEYS.discussion(discussionId),
   }) as DiscussionLoop | null;
 
   if (!raw) {
@@ -984,11 +805,11 @@ export async function handleDiscussionAction(
   if (action === "stop") {
     raw.status = "completed";
     await ctx.state.set(
-      { scopeKind: "company", scopeId: companyId, stateKey: discussionKey(discussionId) },
+      { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.discussion(discussionId) },
       raw,
     );
     await ctx.state.set(
-      { scopeKind: "company", scopeId: companyId, stateKey: `active-discussion-${raw.channelId}-${raw.threadTs}` },
+      { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.activeDiscussion(raw.channelId, raw.threadTs) },
       null,
     );
     await ctx.metrics.write("slack.discussions.stopped", 1, { by: userId });
@@ -998,40 +819,123 @@ export async function handleDiscussionAction(
   // Resume
   raw.status = "active";
   await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: discussionKey(discussionId) },
+    { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.discussion(discussionId) },
     raw,
   );
   await ctx.state.set(
-    { scopeKind: "company", scopeId: companyId, stateKey: `active-discussion-${raw.channelId}-${raw.threadTs}` },
+    { scopeKind: "company", scopeId: companyId, stateKey: STATE_KEYS.activeDiscussion(raw.channelId, raw.threadTs) },
     discussionId,
   );
 
-  // Continue the loop - send to the next agent in line
   const nextAgent = raw.turns % 2 === 0 ? raw.targetAgent : raw.initiatorAgent;
-  ctx.events.emit("acp:message", {
-    agentId: nextAgent,
-    channel: raw.channelId,
-    threadTs: raw.threadTs,
-    text: `[Discussion resumed] Please continue the discussion.`,
-    companyId,
-    discussionId,
-    fromAgent: nextAgent === raw.targetAgent ? raw.initiatorAgent : raw.targetAgent,
-  });
+  const fromAgent = nextAgent === raw.targetAgent ? raw.initiatorAgent : raw.targetAgent;
+
+  const sessions = await getSessions(ctx, raw.companyId ?? companyId, raw.channelId, raw.threadTs);
+  const nextSession = sessions.find((s) => s.agentName === nextAgent && s.status === "active");
+
+  if (nextSession && nextSession.transport === "native") {
+    await ctx.agents.sessions.sendMessage(nextSession.sessionId, companyId, {
+      prompt: "[Discussion resumed] Please continue the discussion.",
+      reason: "Discussion resumed by user",
+    });
+  } else {
+    ctx.events.emit("acp-message", companyId, {
+      agentId: nextAgent,
+      channel: raw.channelId,
+      threadTs: raw.threadTs,
+      text: "[Discussion resumed] Please continue the discussion.",
+      discussionId,
+      fromAgent,
+    });
+  }
 }
 
-// --- Token resolver (for slash command status output) ---
+// --- Slash command handler for /clip acp ---
 
-let cachedToken: string | undefined;
+export async function handleAcpSlashCommand(
+  ctx: PluginContext,
+  token: string,
+  payload: { channel: string; threadTs: string; text: string; companyId: string },
+): Promise<void> {
+  const subArgs = payload.text.trim().split(/\s+/);
+  const sub = subArgs[0]?.toLowerCase() ?? "";
 
-export function setAcpToken(token: string): void {
-  cachedToken = token;
-}
+  if (sub === "spawn") {
+    const agentName = subArgs[1];
+    if (!agentName) {
+      ctx.logger.warn("acp spawn requires an agent name");
+      return;
+    }
+    const displayName = subArgs[2] ?? agentName;
+    const entry = await spawnAgent(ctx, payload.companyId, payload.channel, payload.threadTs, agentName, displayName);
+    if (entry) {
+      await postMessage(ctx, token, payload.channel, {
+        text: `Agent ${displayName} spawned (${entry.transport})`,
+        blocks: [
+          {
+            type: "context",
+            elements: [
+              { type: "mrkdwn", text: `:robot_face: *${displayName}* joined the thread via ${entry.transport}` },
+            ],
+          },
+        ],
+      }, payload.threadTs ? { threadTs: payload.threadTs } : undefined);
+    }
+    return;
+  }
 
-async function resolveToken(ctx: PluginContext): Promise<string> {
-  if (cachedToken) return cachedToken;
-  const rawConfig = await ctx.config.get();
-  const config = rawConfig as unknown as { slackTokenRef: string };
-  const token = await ctx.secrets.resolve(config.slackTokenRef);
-  cachedToken = token;
-  return token;
+  if (sub === "status") {
+    const sessions = await getSessions(ctx, payload.companyId, payload.channel, payload.threadTs);
+    const active = sessions.filter((s) => s.status === "active");
+
+    if (active.length === 0) {
+      await postMessage(ctx, token, payload.channel, {
+        text: "No active agents in thread",
+      }, payload.threadTs ? { threadTs: payload.threadTs } : undefined);
+      return;
+    }
+
+    const lines = active.map((s) => {
+      const age = Math.round((Date.now() - new Date(s.lastActivityAt).getTime()) / 1000);
+      return `:large_green_circle: *${s.agentDisplayName}* (\`${s.agentName}\`) [${s.transport}] - last active ${age}s ago`;
+    });
+
+    await postMessage(ctx, token, payload.channel, {
+      text: `${active.length} active agent(s) in thread`,
+      blocks: [
+        {
+          type: "header",
+          text: { type: "plain_text", text: `Active Agents (${active.length})` },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: lines.join("\n") },
+        },
+      ],
+    }, payload.threadTs ? { threadTs: payload.threadTs } : undefined);
+    return;
+  }
+
+  if (sub === "close") {
+    const targetName = subArgs[1]?.toLowerCase();
+    const closed = await closeAgent(ctx, payload.companyId, payload.channel, payload.threadTs, targetName);
+    if (closed) {
+      await postMessage(ctx, token, payload.channel, {
+        text: `Agent ${closed.agentDisplayName} closed`,
+        blocks: [
+          {
+            type: "context",
+            elements: [
+              { type: "mrkdwn", text: `:wave: *${closed.agentDisplayName}* left the thread` },
+            ],
+          },
+        ],
+      }, payload.threadTs ? { threadTs: payload.threadTs } : undefined);
+    } else {
+      ctx.logger.warn("No matching agent to close", { targetName });
+    }
+    return;
+  }
+
+  ctx.logger.warn("Unknown /acp subcommand", { sub });
 }
