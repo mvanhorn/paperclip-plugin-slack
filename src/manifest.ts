@@ -188,16 +188,6 @@ const manifest: PaperclipPluginManifestV1 = {
       description: "Receives button click payloads from interactive messages (approve/reject/escalation/handoff/discussion/command).",
     },
   ],
-  ui: {
-    slots: [
-      {
-        type: "settingsPage",
-        id: SLOT_IDS.settingsPage,
-        displayName: "Slack Settings",
-        exportName: EXPORT_NAMES.settingsPage,
-      },
-    ],
-  },
 };
 
 export default manifest;
