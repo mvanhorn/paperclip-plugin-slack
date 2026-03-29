@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-slack",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
@@ -30,5 +30,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/mvanhorn/paperclip-plugin-slack"
-  }
+  },
+  "license": "MIT"
 }
