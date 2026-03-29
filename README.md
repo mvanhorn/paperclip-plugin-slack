@@ -1,6 +1,7 @@
 # paperclip-plugin-slack
 
 [![npm](https://img.shields.io/npm/v/paperclip-plugin-slack)](https://www.npmjs.com/package/paperclip-plugin-slack)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Slack Chat OS plugin for [Paperclip](https://github.com/paperclipai/paperclip). Turns Slack into a bidirectional agent command center - notifications, approvals, multi-agent threads, voice-to-task pipelines, custom workflow commands, and proactive agent suggestions.
 
@@ -133,7 +134,7 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
 2. Add the `chat:write` bot scope
 3. Enable **Interactivity** and point the Request URL to your Paperclip host's `slack-interactivity` webhook endpoint
 4. Install the app to your workspace and copy the Bot OAuth Token
-5. In Paperclip, go to **Settings → Secrets** and create a new secret with your Bot OAuth Token. Copy the secret UUID.
+5. In Paperclip, go to **Settings -> Secrets** and create a new secret with your Bot OAuth Token. Copy the secret UUID.
 6. Install the plugin and configure the secret UUID in the `slackTokenRef` field + your default channel ID
 
 ## Configuration
@@ -154,7 +155,7 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
 | `enableDailyDigest` | Send daily activity summary at 9am (default: false) |
 | `escalationChatId` | Dedicated channel for agent escalations (optional) |
 | `escalationTimeoutMs` | Timeout before default action fires (default: 900000 / 15 min) |
-| `escalationDefaultAction` | Action on timeout: `defer`, `close`, `retry`, `escalate_further` (default: `defer`) |
+| `escalationDefaultAction` | Action on timeout: `defer`, `dismiss`, or `auto_reply` (default: `defer`) |
 | `escalationHoldMessage` | Message sent to customer while waiting (default: "Your request has been escalated to a human agent. Please hold.") |
 | `paperclipBaseUrl` | Base URL for the Paperclip API (default: `http://localhost:3100`) |
 | `maxAgentsPerThread` | Max concurrent agents in a single thread (default: 5) |
@@ -180,18 +181,24 @@ The plugin registers these tools that agents can call:
 
 The `slackTokenRef` field now declares `format: "secret-ref"`, which is required for Paperclip to collect and resolve secret references at activation time. Previously, the field was a plain `string` with no format annotation, causing plugin activation to fail with `Invalid secret reference`.
 
-**If you installed v2.0.0:** you must re-configure the plugin. Go to **Settings → Secrets**, create a secret with your Slack Bot OAuth Token, and paste the resulting secret UUID into the `slackTokenRef` field in the plugin configuration. Raw token strings are no longer accepted in this field.
+**If you installed v2.0.0:** you must re-configure the plugin. Go to **Settings -> Secrets**, create a secret with your Slack Bot OAuth Token, and paste the resulting secret UUID into the `slackTokenRef` field in the plugin configuration. Raw token strings are no longer accepted in this field.
 
 ## Development
 
 ```bash
-npm install
-npm run typecheck
-npm test
-npm run build
+pnpm install
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-Requires `@paperclipai/plugin-sdk` and `@paperclipai/shared` as peer dependencies. For local development, link them from the Paperclip monorepo.
+97 tests covering notifications, approvals, escalation, session registry, media pipeline, custom commands, proactive suggestions, Block Kit formatting, and slash commands.
+
+## Contributing
+
+Issues and PRs welcome at [github.com/mvanhorn/paperclip-plugin-slack](https://github.com/mvanhorn/paperclip-plugin-slack).
+
+Auto-publishes to npm on push to `main` via OIDC trusted publishing.
 
 ## Credits
 
