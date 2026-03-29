@@ -26,5 +26,9 @@
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
     "worker": "./dist/worker.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mvanhorn/paperclip-plugin-slack"
   }
 }
