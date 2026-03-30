@@ -1,5 +1,6 @@
 import {
   definePlugin,
+  runWorker,
   type PluginContext,
   type PluginEvent,
   type PluginWebhookInput,
@@ -345,7 +346,7 @@ async function handleApproveCommand(ctx: PluginContext, responseUrl: string, app
 
 // --- Plugin definition ---
 
-export default definePlugin({
+const plugin = definePlugin({
   async setup(ctx) {
     const rawConfig = await ctx.config.get();
     const config = rawConfig as unknown as SlackConfig;
@@ -1422,3 +1423,6 @@ export default definePlugin({
     return { status: "ok" };
   },
 });
+
+export default plugin;
+runWorker(plugin, import.meta.url);
