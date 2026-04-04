@@ -37,7 +37,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "activity.log.write",
     "metrics.write",
     "jobs.schedule",
-    "agent.tools.register",
+    "agent.tools.register","projects.read","goals.read",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -156,7 +156,7 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: "daily-digest",
       displayName: "Daily Activity Digest",
       description: "Posts a summary of agent activity, costs, and completed tasks to Slack.",
-      schedule: "0 9 * * *",
+      schedule: "0 */2 * * *",
     },
     {
       jobKey: "check-escalation-timeouts",

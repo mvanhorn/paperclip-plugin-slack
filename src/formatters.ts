@@ -10,12 +10,45 @@ export function setBaseUrl(url: string) {
   dashboardBase = url.replace(/\/+$/, "");
 }
 
+// --- Priority emoji mapping ---
+const PRIORITY_EMOJI: Record<string, string> = {
+  critical: ":rotating_light:",
+  high: ":red_circle:",
+  medium: ":large_orange_circle:",
+  low: ":white_circle:",
+};
+
+const PRIORITY_KR: Record<string, string> = {
+  critical: "긴급",
+  high: "높음",
+  medium: "보통",
+  low: "낮음",
+};
+
+const STATUS_EMOJI: Record<string, string> = {
+  backlog: ":inbox_tray:",
+  todo: ":clipboard:",
+  in_progress: ":hammer_and_wrench:",
+  in_review: ":mag:",
+  done: ":white_check_mark:",
+  cancelled: ":no_entry_sign:",
+};
+
+const STATUS_KR: Record<string, string> = {
+  backlog: "대기",
+  todo: "할 일",
+  in_progress: "진행 중",
+  in_review: "검토 중",
+  done: "완료",
+  cancelled: "취소",
+};
+
 function contextFooter(timestamp?: string): Record<string, unknown> {
   const elements: Array<Record<string, unknown>> = [
-    { type: "mrkdwn", text: "Paperclip" },
+    { type: "mrkdwn", text: ":paperclip: *Paperclip*" },
   ];
   if (timestamp) {
-    elements.push({ type: "mrkdwn", text: `<!date^${Math.floor(new Date(timestamp).getTime() / 1000)}^{date_short_pretty} at {time}|${timestamp}>` });
+    elements.push({ type: "mrkdwn", text: `<!date^${Math.floor(new Date(timestamp).getTime() / 1000)}^{date_short_pretty} {time}|${timestamp}>` });
   }
   return { type: "context", elements };
 }
@@ -70,30 +103,43 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
   const p = event.payload as Payload;
   const identifier = String(p.identifier ?? event.entityId);
   const title = String(p.title ?? "Untitled");
-  const description = p.description ? String(p.description).slice(0, 300) : null;
+  const description = p.description ? String(p.description) : null;
   const status = p.status ? String(p.status) : null;
   const priority = p.priority ? String(p.priority) : null;
   const assigneeName = p.assigneeName ? String(p.assigneeName) : null;
   const projectName = p.projectName ? String(p.projectName) : null;
+  const goalName = p.goalName ? String(p.goalName) : null;
+  const parentIdentifier = p.parentIdentifier ? String(p.parentIdentifier) : null;
 
-  const fields: Array<{ type: string; text: string }> = [];
-  if (status) fields.push({ type: "mrkdwn", text: `*Status*\n\`${status}\`` });
-  if (priority) fields.push({ type: "mrkdwn", text: `*Priority*\n\`${priority}\`` });
-  if (assigneeName) fields.push({ type: "mrkdwn", text: `*Assignee*\n${assigneeName}` });
-  if (projectName) fields.push({ type: "mrkdwn", text: `*Project*\n${projectName}` });
+  const priorityEmoji = priority ? (PRIORITY_EMOJI[priority] ?? ":red_circle:") : ":red_circle:";
+  const priorityKr = priority ? (PRIORITY_KR[priority] ?? priority) : null;
+  const statusKr = status ? (STATUS_KR[status] ?? status) : "";
+
+  // Header line
+  let header = `${priorityEmoji} *새 이슈: ${identifier}*`;
+  if (parentIdentifier) header += ` (상위: ${parentIdentifier})`;
+  header += `\n*${title}*`;
+
+  // Description (truncated)
+  if (description) {
+    header += `\n${description.slice(0, 300)}`;
+  }
 
   const blocks: Array<Record<string, unknown>> = [
     {
       type: "section",
-      text: {
-        type: "mrkdwn",
-        text: description
-          ? `*New issue created*\n*${identifier}* ${title}\n> ${description}`
-          : `*New issue created*\n*${identifier}* ${title}`,
-      },
-      accessory: viewButton("View Issue", `${dashboardBase}/issues/${event.entityId}`),
+      text: { type: "mrkdwn", text: header },
+      accessory: viewButton("대시보드", `${dashboardBase}/issues/${event.entityId}`),
     },
   ];
+
+  // Fields block for metadata
+  const fields: Array<{ type: string; text: string }> = [];
+  fields.push({ type: "mrkdwn", text: `*담당자*\n:bust_in_silhouette: ${assigneeName ?? "미할당"}` });
+  if (priorityKr) fields.push({ type: "mrkdwn", text: `*우선순위*\n${priorityEmoji} ${priorityKr}` });
+  if (projectName) fields.push({ type: "mrkdwn", text: `*프로젝트*\n:file_folder: ${projectName}` });
+  if (goalName) fields.push({ type: "mrkdwn", text: `*목표*\n:dart: ${goalName}` });
+  if (statusKr) fields.push({ type: "mrkdwn", text: `*상태*\n:clipboard: ${statusKr}` });
 
   if (fields.length > 0) {
     blocks.push({ type: "section", fields });
@@ -102,7 +148,7 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `New issue: ${identifier} - ${title}`,
+    text: `${priorityEmoji} 새 이슈: ${identifier} - ${title} → ${assigneeName ?? "미할당"}`,
     blocks,
   };
 }
@@ -111,30 +157,62 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
   const p = event.payload as Payload;
   const identifier = String(p.identifier ?? event.entityId);
   const title = String(p.title ?? "");
+  const description = p.description ? String(p.description) : null;
+  const assigneeName = p.assigneeName ? String(p.assigneeName) : null;
+  const projectName = p.projectName ? String(p.projectName) : null;
 
-  const fields: Array<{ type: string; text: string }> = [];
-  if (p.status) fields.push({ type: "mrkdwn", text: `*Status*\n\`${String(p.status)}\`` });
-  if (p.priority) fields.push({ type: "mrkdwn", text: `*Priority*\n\`${String(p.priority)}\`` });
+  const lines = [`:white_check_mark: *${identifier} 완료*`, `*${title}*`];
+  if (description) lines.push(description.slice(0, 150));
+  const meta: string[] = [];
+  if (assigneeName) meta.push(`:bust_in_silhouette: ${assigneeName}`);
+  if (projectName) meta.push(`:file_folder: ${projectName}`);
+  if (meta.length > 0) lines.push(meta.join(" · "));
 
   const blocks: Array<Record<string, unknown>> = [
     {
       type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Issue completed* :white_check_mark:\n*${identifier}* ${title} is now done.`,
-      },
-      accessory: viewButton("View Issue", `${dashboardBase}/issues/${event.entityId}`),
+      text: { type: "mrkdwn", text: lines.join("\n") },
+      accessory: viewButton("대시보드", `${dashboardBase}/issues/${event.entityId}`),
     },
+    contextFooter(event.occurredAt),
   ];
 
-  if (fields.length > 0) {
-    blocks.push({ type: "section", fields });
-  }
+  return {
+    text: `:white_check_mark: 완료: ${identifier} - ${title}`,
+    blocks,
+  };
+}
 
-  blocks.push(contextFooter(event.occurredAt));
+export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const identifier = String(p.identifier ?? event.entityId);
+  const title = String(p.title ?? "");
+  const description = p.description ? String(p.description) : null;
+  const status = p.status ? String(p.status) : "unknown";
+  const assigneeName = p.assigneeName ? String(p.assigneeName) : null;
+  const projectName = p.projectName ? String(p.projectName) : null;
+
+  const statusEmoji = STATUS_EMOJI[status] ?? ":hammer_and_wrench:";
+  const statusKr = STATUS_KR[status] ?? status;
+
+  const lines = [`${statusEmoji} *${identifier}* → ${statusKr}`];
+  if (title) lines.push(`*${title}*`);
+  if (description) lines.push(description.slice(0, 150));
+  const meta: string[] = [];
+  if (assigneeName) meta.push(`:bust_in_silhouette: ${assigneeName}`);
+  if (projectName) meta.push(`:file_folder: ${projectName}`);
+  if (meta.length > 0) lines.push(meta.join(" · "));
+
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: lines.join("\n") },
+    },
+    contextFooter(event.occurredAt),
+  ];
 
   return {
-    text: `Issue done: ${identifier}`,
+    text: `${statusEmoji} ${identifier} → ${statusKr}: ${title}`,
     blocks,
   };
 }
@@ -149,10 +227,10 @@ export function formatApprovalCreated(event: PluginEvent): SlackMessage {
   const issueIds = Array.isArray(p.issueIds) ? p.issueIds : [];
 
   const fields: Array<{ type: string; text: string }> = [];
-  if (agentName) fields.push({ type: "mrkdwn", text: `*Agent*\n${agentName}` });
-  fields.push({ type: "mrkdwn", text: `*Type*\n\`${approvalType}\`` });
+  if (agentName) fields.push({ type: "mrkdwn", text: `*요청 에이전트*\n:robot_face: ${agentName}` });
+  fields.push({ type: "mrkdwn", text: `*유형*\n\`${approvalType}\`` });
   if (issueIds.length > 0) {
-    fields.push({ type: "mrkdwn", text: `*Linked Issues*\n${issueIds.join(", ")}` });
+    fields.push({ type: "mrkdwn", text: `*관련 이슈*\n${issueIds.join(", ")}` });
   }
 
   const blocks: Array<Record<string, unknown>> = [
@@ -161,8 +239,8 @@ export function formatApprovalCreated(event: PluginEvent): SlackMessage {
       text: {
         type: "mrkdwn",
         text: description
-          ? `*Approval requested* :rotating_light:\n${title ? `*${title}*\n` : ""}${description}`
-          : `*Approval requested* :rotating_light:${title ? `\n*${title}*` : ""}`,
+          ? `:rotating_light: *승인 요청*\n${title ? `*${title}*\n` : ""}${description}`
+          : `:rotating_light: *승인 요청*${title ? `\n*${title}*` : ""}`,
       },
     },
   ];
@@ -176,21 +254,21 @@ export function formatApprovalCreated(event: PluginEvent): SlackMessage {
     elements: [
       {
         type: "button",
-        text: { type: "plain_text", text: "Approve" },
+        text: { type: "plain_text", text: "승인" },
         style: "primary",
         action_id: "approval_approve",
         value: approvalId,
       },
       {
         type: "button",
-        text: { type: "plain_text", text: "Reject" },
+        text: { type: "plain_text", text: "거부" },
         style: "danger",
         action_id: "approval_reject",
         value: approvalId,
       },
       {
         type: "button",
-        text: { type: "plain_text", text: "View" },
+        text: { type: "plain_text", text: "상세 보기" },
         url: `${dashboardBase}/approvals/${approvalId}`,
         action_id: "approval_view",
       },
@@ -200,7 +278,7 @@ export function formatApprovalCreated(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `Approval needed (${approvalType}) for ${issueIds.length} issue(s)`,
+    text: `:rotating_light: 승인 필요 (${approvalType}) — ${issueIds.length}건`,
     blocks,
   };
 }
@@ -210,7 +288,7 @@ export function formatApprovalResolved(
   approved: boolean,
   userId: string,
 ): SlackMessage {
-  const action = approved ? "Approved" : "Rejected";
+  const action = approved ? "승인됨" : "거부됨";
   const emoji = approved ? ":white_check_mark:" : ":x:";
 
   return {
@@ -220,9 +298,9 @@ export function formatApprovalResolved(
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `${emoji} *${action}* by <@${userId}>`,
+          text: `${emoji} *${action}* — <@${userId}>`,
         },
-        accessory: viewButton("View", `${dashboardBase}/approvals/${approvalId}`),
+        accessory: viewButton("보기", `${dashboardBase}/approvals/${approvalId}`),
       },
     ],
   };
@@ -234,13 +312,13 @@ export function formatAgentError(event: PluginEvent): SlackMessage {
   const errorMessage = String(p.error ?? p.message ?? "Unknown error");
 
   return {
-    text: `Agent error: ${agentName}`,
+    text: `:warning: 에이전트 에러: ${agentName}`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Agent error* :warning:\n*${agentName}* encountered an error:\n\`\`\`${errorMessage.slice(0, 500)}\`\`\``,
+          text: `:warning: *에이전트 에러*\n:robot_face: *${agentName}*\n\`\`\`${errorMessage.slice(0, 500)}\`\`\``,
         },
       },
       contextFooter(event.occurredAt),
@@ -253,13 +331,13 @@ export function formatAgentConnected(event: PluginEvent): SlackMessage {
   const agentName = String(p.agentName ?? p.name ?? event.entityId);
 
   return {
-    text: `Agent online: ${agentName}`,
+    text: `:white_check_mark: 에이전트 온라인: ${agentName}`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Agent online* :white_check_mark:\n*${agentName}* is now connected and ready.`,
+          text: `:white_check_mark: *에이전트 온라인*\n:robot_face: *${agentName}* 연결됨`,
         },
       },
       contextFooter(event.occurredAt),
@@ -275,13 +353,13 @@ export function formatBudgetThreshold(event: PluginEvent): SlackMessage {
   const pct = p.percentUsed != null ? String(p.percentUsed) : "?";
 
   return {
-    text: `Budget alert: ${agentName} at ${pct}%`,
+    text: `:chart_with_upwards_trend: 예산 알림: ${agentName} ${pct}% 사용`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Budget threshold reached* :chart_with_upwards_trend:\n*${agentName}* has used *${pct}%* of budget ($${spent} / $${budget})`,
+          text: `:chart_with_upwards_trend: *예산 임계값 도달*\n:robot_face: *${agentName}* — *${pct}%* 사용 ($${spent} / $${budget})`,
         },
       },
       contextFooter(event.occurredAt),
@@ -295,13 +373,13 @@ export function formatOnboardingMilestone(event: PluginEvent): SlackMessage {
   const milestone = String(p.milestone ?? "first heartbeat");
 
   return {
-    text: `Milestone: ${agentName} - ${milestone}`,
+    text: `:tada: 마일스톤: ${agentName} — ${milestone}`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Onboarding milestone* :tada:\n*${agentName}* achieved: ${milestone}`,
+          text: `:tada: *마일스톤 달성*\n:robot_face: *${agentName}* — ${milestone}`,
         },
       },
       contextFooter(event.occurredAt),
@@ -317,19 +395,20 @@ export function formatDailyDigest(stats: {
   topAgent: string;
 }): SlackMessage {
   return {
-    text: `Daily digest: ${stats.tasksCompleted} tasks completed, $${stats.totalCost} spent`,
+    text: `팀 활동 요약: ${stats.tasksCompleted}건 완료, $${stats.totalCost} 사용`,
     blocks: [
       {
         type: "header",
-        text: { type: "plain_text", text: "Daily Activity Digest" },
+        text: { type: "plain_text", text: ":bar_chart: 팀 활동 요약" },
       },
+      { type: "divider" },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: `*Tasks completed*\n${stats.tasksCompleted}` },
-          { type: "mrkdwn", text: `*Tasks created*\n${stats.tasksCreated}` },
-          { type: "mrkdwn", text: `*Active agents*\n${stats.agentsActive}` },
-          { type: "mrkdwn", text: `*Total cost*\n$${stats.totalCost}` },
+          { type: "mrkdwn", text: `*:white_check_mark: 완료*\n${stats.tasksCompleted}건` },
+          { type: "mrkdwn", text: `*:inbox_tray: 생성*\n${stats.tasksCreated}건` },
+          { type: "mrkdwn", text: `*:robot_face: 활성 에이전트*\n${stats.agentsActive}명` },
+          { type: "mrkdwn", text: `*:moneybag: 비용*\n$${stats.totalCost}` },
         ],
       },
       ...(stats.topAgent
@@ -338,7 +417,7 @@ export function formatDailyDigest(stats: {
               type: "section" as const,
               text: {
                 type: "mrkdwn" as const,
-                text: `*Top performer:* ${stats.topAgent}`,
+                text: `:trophy: *MVP:* ${stats.topAgent}`,
               },
             },
           ]
@@ -346,7 +425,7 @@ export function formatDailyDigest(stats: {
       { type: "divider" },
       {
         type: "context",
-        elements: [{ type: "mrkdwn", text: "Paperclip - Daily Digest" }],
+        elements: [{ type: "mrkdwn", text: ":paperclip: *Paperclip* — 2시간 활동 요약" }],
       },
     ],
   };
@@ -359,26 +438,26 @@ export function formatEscalationMessage(escalation: EscalationRecord): SlackMess
 
   blocks.push({
     type: "header",
-    text: { type: "plain_text", text: `Escalation from ${escalation.agentName ?? "Agent"}` },
+    text: { type: "plain_text", text: `:sos: ${escalation.agentName ?? "에이전트"} 에스컬레이션` },
   });
 
   const fields: Array<{ type: string; text: string }> = [
-    { type: "mrkdwn", text: `*Reason*\n${escalation.reason}` },
+    { type: "mrkdwn", text: `*사유*\n${escalation.reason}` },
   ];
   if (escalation.confidence != null) {
-    fields.push({ type: "mrkdwn", text: `*Confidence*\n${escalation.confidence}` });
+    fields.push({ type: "mrkdwn", text: `*확신도*\n${escalation.confidence}` });
   }
   blocks.push({ type: "section", fields });
 
   if (escalation.conversationHistory && escalation.conversationHistory.length > 0) {
     const lastMessages = escalation.conversationHistory.slice(-5);
     const historyText = lastMessages
-      .map((msg) => `${msg.role}: ${msg.text}`)
+      .map((msg) => `*${msg.role}:* ${msg.text}`)
       .join("\n");
     blocks.push({
       type: "context",
       elements: [
-        { type: "mrkdwn", text: `*Recent conversation*\n${historyText.slice(0, 2000)}` },
+        { type: "mrkdwn", text: `*최근 대화*\n${historyText.slice(0, 2000)}` },
       ],
     });
   }
@@ -388,7 +467,7 @@ export function formatEscalationMessage(escalation: EscalationRecord): SlackMess
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Agent reasoning*\n${escalation.agentReasoning}`,
+        text: `*에이전트 판단*\n${escalation.agentReasoning}`,
       },
     });
   }
@@ -398,7 +477,7 @@ export function formatEscalationMessage(escalation: EscalationRecord): SlackMess
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Suggested reply*\n> ${escalation.suggestedReply}`,
+        text: `*제안 답변*\n> ${escalation.suggestedReply}`,
       },
     });
   }
@@ -408,26 +487,26 @@ export function formatEscalationMessage(escalation: EscalationRecord): SlackMess
     elements: [
       {
         type: "button",
-        text: { type: "plain_text", text: "Use Suggested Reply" },
+        text: { type: "plain_text", text: "제안 답변 사용" },
         style: "primary",
         action_id: "escalation_use_suggested",
         value: escalation.id,
       },
       {
         type: "button",
-        text: { type: "plain_text", text: "Reply to Customer" },
+        text: { type: "plain_text", text: "직접 답변" },
         action_id: "escalation_reply",
         value: escalation.id,
       },
       {
         type: "button",
-        text: { type: "plain_text", text: "Override Agent" },
+        text: { type: "plain_text", text: "에이전트 오버라이드" },
         action_id: "escalation_override",
         value: escalation.id,
       },
       {
         type: "button",
-        text: { type: "plain_text", text: "Dismiss" },
+        text: { type: "plain_text", text: "무시" },
         style: "danger",
         action_id: "escalation_dismiss",
         value: escalation.id,
@@ -436,7 +515,7 @@ export function formatEscalationMessage(escalation: EscalationRecord): SlackMess
   });
 
   return {
-    text: `Escalation from ${escalation.agentName ?? "Agent"}: ${escalation.reason}`,
+    text: `:sos: ${escalation.agentName ?? "에이전트"} 에스컬레이션: ${escalation.reason}`,
     blocks,
   };
 }
@@ -448,21 +527,21 @@ export function formatEscalationResolved(
 ): SlackMessage {
   const emoji = action === "dismiss" || action === "escalation_dismiss" ? ":x:" : ":white_check_mark:";
   const label = action === "escalation_use_suggested"
-    ? "Used suggested reply"
+    ? "제안 답변 사용"
     : action === "escalation_override"
-      ? "Overrode agent"
+      ? "에이전트 오버라이드"
       : action === "escalation_dismiss"
-        ? "Dismissed"
-        : "Replied";
+        ? "무시됨"
+        : "답변 완료";
 
   return {
-    text: `Escalation ${label} by ${userId}`,
+    text: `에스컬레이션 ${label} — ${userId}`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `${emoji} *Escalation ${label}* by <@${userId}>`,
+          text: `${emoji} *에스컬레이션 ${label}* — <@${userId}>`,
         },
       },
     ],

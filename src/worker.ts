@@ -26,6 +26,7 @@ import {
   setBaseUrl,
   formatIssueCreated,
   formatIssueDone,
+  formatIssueStatusChanged,
   formatApprovalCreated,
   formatApprovalResolved,
   formatAgentError,
@@ -723,12 +724,25 @@ const plugin = definePlugin({
     // Notification helper (supports per-type channel override + threading)
     // =========================================================================
 
+    // Dedup: skip events already processed (prevents double-posting)
+    const recentEvents = new Set<string>();
+    const DEDUP_TTL_MS = 30_000;
+
     const notify = async (
       event: PluginEvent,
       formatter: (e: PluginEvent) => SlackMessage,
       overrideChannelId?: string,
       opts?: { threadTs?: string },
     ) => {
+      // Dedup guard — skip if same eventId already processed
+      const dedupKey = `${event.eventId}:${event.eventType}`;
+      if (recentEvents.has(dedupKey)) {
+        ctx.logger.debug("Skipping duplicate event", { eventId: event.eventId, eventType: event.eventType });
+        return;
+      }
+      recentEvents.add(dedupKey);
+      setTimeout(() => recentEvents.delete(dedupKey), DEDUP_TTL_MS);
+
       const fallback = overrideChannelId || config.defaultChannelId;
       const channelId = await resolveChannel(ctx, event.companyId, fallback);
       if (!channelId) return;
@@ -754,27 +768,40 @@ const plugin = definePlugin({
     if (config.notifyOnIssueCreated) {
       ctx.events.on("issue.created", async (event: PluginEvent) => {
         const result = await notify(event, formatIssueCreated);
+        ctx.logger.info("issue.created notify result", { entityId: event.entityId, ok: result?.ok, ts: result?.ts });
         if (result?.ok && result.ts) {
+          const stateKey = STATE_KEYS.threadIssue(event.entityId ?? "");
           await ctx.state.set(
-            { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadIssue(event.entityId ?? "") },
+            { scopeKind: "company", scopeId: event.companyId, stateKey },
             result.ts,
           );
+          ctx.logger.info("Saved thread_ts for issue", { entityId: event.entityId, stateKey, threadTs: result.ts });
         }
       });
     }
 
-    if (config.notifyOnIssueDone) {
-      ctx.events.on("issue.updated", async (event: PluginEvent) => {
-        const payload = event.payload as Record<string, unknown>;
-        if (payload.status !== "done") return;
-        const threadTs = await ctx.state.get({
-          scopeKind: "company",
-          scopeId: event.companyId,
-          stateKey: STATE_KEYS.threadIssue(event.entityId ?? ""),
-        }) as string | null;
-        await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
+    // issue.updated — all status changes go to the same thread as issue.created
+    ctx.events.on("issue.updated", async (event: PluginEvent) => {
+      const payload = event.payload as Record<string, unknown>;
+      const status = payload.status ? String(payload.status) : null;
+      if (!status) return;
+
+      // Look up the original thread for this issue (state may return number — force string)
+      const stateKey = STATE_KEYS.threadIssue(event.entityId ?? "");
+      const rawThreadTs = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey,
       });
-    }
+      const threadTs = rawThreadTs != null ? String(rawThreadTs) : null;
+      ctx.logger.info("issue.updated thread lookup", { entityId: event.entityId, stateKey, threadTs, status });
+
+      if (status === "done" && config.notifyOnIssueDone) {
+        await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
+      } else if (status !== "done" && (config as Record<string, unknown>).notifyOnIssueUpdated !== false) {
+        await notify(event, formatIssueStatusChanged, undefined, threadTs ? { threadTs } : undefined);
+      }
+    });
 
     if (config.notifyOnApprovalCreated) {
       ctx.events.on("approval.created", async (event: PluginEvent) => {

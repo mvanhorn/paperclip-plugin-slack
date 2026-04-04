@@ -33,6 +33,7 @@ export const STATE_KEYS = {
   budgetAlert: (id: string, bucket: number) => `budget-alert-${id}-${bucket}`,
   watchRegistry: (ch: string, ts: string) => `watches_${ch}_${ts}`,
   commandRegistry: "custom-commands",
+  eventDedup: (id: string) => `event-dedup-${id}`,
 } as const;
 
 export const DEFAULT_CONFIG = {
@@ -44,6 +45,7 @@ export const DEFAULT_CONFIG = {
   escalationChatId: "",
   notifyOnIssueCreated: true,
   notifyOnIssueDone: true,
+  notifyOnIssueUpdated: true,
   notifyOnApprovalCreated: true,
   notifyOnAgentError: true,
   notifyOnAgentConnected: true,
