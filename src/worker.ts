@@ -950,12 +950,46 @@ const plugin = definePlugin({
             }
           }
 
+          // Build per-agent breakdown and issue lists
+          const agentMap = new Map<string, string>();
+          for (const a of agents) agentMap.set(a.id, a.name);
+
+          const agentStats: Record<string, { completed: number; inProgress: number; created: number }> = {};
+          const completedIssues: Array<{ identifier: string; title: string; agentName: string }> = [];
+          const inProgressIssues: Array<{ identifier: string; title: string; agentName: string }> = [];
+          const createdIssues: Array<{ identifier: string; title: string; agentName: string }> = [];
+
+          for (const issue of issues) {
+            const updated = new Date(issue.updatedAt);
+            const created = new Date(issue.createdAt);
+            const agentName = issue.assigneeAgentId ? (agentMap.get(issue.assigneeAgentId) ?? "미할당") : "미할당";
+
+            if (!agentStats[agentName]) agentStats[agentName] = { completed: 0, inProgress: 0, created: 0 };
+
+            if (issue.status === "done" && updated >= dayAgo) {
+              agentStats[agentName].completed++;
+              completedIssues.push({ identifier: issue.identifier ?? issue.id.slice(0, 8), title: issue.title ?? "", agentName });
+            }
+            if (issue.status === "in_progress") {
+              agentStats[agentName].inProgress++;
+              inProgressIssues.push({ identifier: issue.identifier ?? issue.id.slice(0, 8), title: issue.title ?? "", agentName });
+            }
+            if (created >= dayAgo) {
+              agentStats[agentName].created++;
+              createdIssues.push({ identifier: issue.identifier ?? issue.id.slice(0, 8), title: issue.title ?? "", agentName });
+            }
+          }
+
           await postMessage(ctx, token, channelId, formatDailyDigest({
             tasksCompleted,
             tasksCreated,
             agentsActive,
             totalCost,
             topAgent,
+            agentStats,
+            completedIssues: completedIssues.slice(0, 10),
+            inProgressIssues: inProgressIssues.slice(0, 10),
+            createdIssues: createdIssues.slice(0, 10),
           }));
 
           // Clean up previous day's cost state

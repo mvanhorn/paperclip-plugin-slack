@@ -387,47 +387,99 @@ export function formatOnboardingMilestone(event: PluginEvent): SlackMessage {
   };
 }
 
+interface IssueItem {
+  identifier: string;
+  title: string;
+  agentName: string;
+}
+
 export function formatDailyDigest(stats: {
   tasksCompleted: number;
   tasksCreated: number;
   agentsActive: number;
   totalCost: string;
   topAgent: string;
+  agentStats?: Record<string, { completed: number; inProgress: number; created: number }>;
+  completedIssues?: IssueItem[];
+  inProgressIssues?: IssueItem[];
+  createdIssues?: IssueItem[];
 }): SlackMessage {
-  return {
-    text: `팀 활동 요약: ${stats.tasksCompleted}건 완료, $${stats.totalCost} 사용`,
-    blocks: [
-      {
-        type: "header",
-        text: { type: "plain_text", text: ":bar_chart: 팀 활동 요약" },
-      },
-      { type: "divider" },
-      {
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: ":bar_chart: 팀 활동 요약" },
+    },
+    { type: "divider" },
+    {
+      type: "section",
+      fields: [
+        { type: "mrkdwn", text: `*:white_check_mark: 완료*\n${stats.tasksCompleted}건` },
+        { type: "mrkdwn", text: `*:inbox_tray: 생성*\n${stats.tasksCreated}건` },
+        { type: "mrkdwn", text: `*:robot_face: 활성 에이전트*\n${stats.agentsActive}명` },
+        { type: "mrkdwn", text: `*:moneybag: 비용*\n$${stats.totalCost}` },
+      ],
+    },
+  ];
+
+  // Per-agent breakdown
+  if (stats.agentStats && Object.keys(stats.agentStats).length > 0) {
+    const agentLines = Object.entries(stats.agentStats)
+      .filter(([, s]) => s.completed > 0 || s.inProgress > 0 || s.created > 0)
+      .map(([name, s]) => {
+        const parts: string[] = [];
+        if (s.completed > 0) parts.push(`✅${s.completed}`);
+        if (s.inProgress > 0) parts.push(`🔧${s.inProgress}`);
+        if (s.created > 0) parts.push(`📥${s.created}`);
+        return `:robot_face: *${name}* — ${parts.join(" ")}`;
+      });
+    if (agentLines.length > 0) {
+      blocks.push({ type: "divider" });
+      blocks.push({
         type: "section",
-        fields: [
-          { type: "mrkdwn", text: `*:white_check_mark: 완료*\n${stats.tasksCompleted}건` },
-          { type: "mrkdwn", text: `*:inbox_tray: 생성*\n${stats.tasksCreated}건` },
-          { type: "mrkdwn", text: `*:robot_face: 활성 에이전트*\n${stats.agentsActive}명` },
-          { type: "mrkdwn", text: `*:moneybag: 비용*\n$${stats.totalCost}` },
-        ],
-      },
-      ...(stats.topAgent
-        ? [
-            {
-              type: "section" as const,
-              text: {
-                type: "mrkdwn" as const,
-                text: `:trophy: *MVP:* ${stats.topAgent}`,
-              },
-            },
-          ]
-        : []),
-      { type: "divider" },
-      {
-        type: "context",
-        elements: [{ type: "mrkdwn", text: ":paperclip: *Paperclip* — 2시간 활동 요약" }],
-      },
-    ],
+        text: { type: "mrkdwn", text: `*에이전트별 활동*\n${agentLines.join("\n")}` },
+      });
+    }
+  }
+
+  // Completed issues list
+  if (stats.completedIssues && stats.completedIssues.length > 0) {
+    const lines = stats.completedIssues
+      .map((i) => `✅ *${i.identifier}* ${i.title.slice(0, 50)} — ${i.agentName}`)
+      .join("\n");
+    blocks.push({ type: "divider" });
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*완료된 이슈*\n${lines}` },
+    });
+  }
+
+  // In-progress issues list
+  if (stats.inProgressIssues && stats.inProgressIssues.length > 0) {
+    const lines = stats.inProgressIssues
+      .map((i) => `🔧 *${i.identifier}* ${i.title.slice(0, 50)} — ${i.agentName}`)
+      .join("\n");
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*진행 중*\n${lines}` },
+    });
+  }
+
+  if (stats.topAgent) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `:trophy: *MVP:* ${stats.topAgent}` },
+    });
+  }
+
+  blocks.push({ type: "divider" });
+  blocks.push({
+    type: "context",
+    elements: [{ type: "mrkdwn", text: ":paperclip: *Paperclip* — 2시간 활동 요약" }],
+  });
+
+  return {
+    text: `팀 활동 요약: ${stats.tasksCompleted}건 완료, ${stats.tasksCreated}건 생성, $${stats.totalCost} 사용`,
+    blocks,
   };
 }
 
