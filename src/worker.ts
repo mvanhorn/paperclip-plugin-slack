@@ -724,9 +724,9 @@ const plugin = definePlugin({
     // Notification helper (supports per-type channel override + threading)
     // =========================================================================
 
-    // Dedup: skip events already processed (prevents double-posting)
+    // Dedup: content-based — same entity+type+status within TTL is duplicate
     const recentEvents = new Set<string>();
-    const DEDUP_TTL_MS = 30_000;
+    const DEDUP_TTL_MS = 10_000;
 
     const notify = async (
       event: PluginEvent,
@@ -734,10 +734,14 @@ const plugin = definePlugin({
       overrideChannelId?: string,
       opts?: { threadTs?: string },
     ) => {
-      // Dedup guard — skip if same eventId already processed
-      const dedupKey = `${event.eventId}:${event.eventType}`;
+      // Content-based dedup — same entity + event type + status = duplicate
+      const payload = event.payload as Record<string, unknown>;
+      const status = payload.status ? String(payload.status) : "";
+      const dedupKey = `${event.entityId}:${event.eventType}:${status}`;
       if (recentEvents.has(dedupKey)) {
-        ctx.logger.debug("Skipping duplicate event", { eventId: event.eventId, eventType: event.eventType });
+        ctx.logger.debug("Skipping duplicate event (content-dedup)", {
+          entityId: event.entityId, eventType: event.eventType, status,
+        });
         return;
       }
       recentEvents.add(dedupKey);
