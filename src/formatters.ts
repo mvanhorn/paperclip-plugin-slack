@@ -43,6 +43,20 @@ const STATUS_KR: Record<string, string> = {
   cancelled: "취소",
 };
 
+// Agent name → Slack User ID mapping
+const AGENT_SLACK_UID: Record<string, string> = {
+  Kuromi: "U0AQMUV1BAM",
+  HelloKitty: "U0AQ4PME36F",
+  MyMelody: "U0AQEQNBM4L",
+  BadtzMaru: "U0AQ90MLZJS",
+  Cinnamoroll: "U0AQ4R8B4Q3",
+};
+
+function slackMention(name: string): string {
+  const uid = AGENT_SLACK_UID[name];
+  return uid ? `<@${uid}>` : name;
+}
+
 function contextFooter(timestamp?: string): Record<string, unknown> {
   const elements: Array<Record<string, unknown>> = [
     { type: "mrkdwn", text: ":paperclip: *Paperclip*" },
@@ -135,7 +149,7 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
 
   // Fields block for metadata
   const fields: Array<{ type: string; text: string }> = [];
-  fields.push({ type: "mrkdwn", text: `*담당자*\n:bust_in_silhouette: ${assigneeName ?? "미할당"}` });
+  fields.push({ type: "mrkdwn", text: `*담당자*\n:bust_in_silhouette: ${assigneeName ? slackMention(assigneeName) : "미할당"}` });
   if (priorityKr) fields.push({ type: "mrkdwn", text: `*우선순위*\n${priorityEmoji} ${priorityKr}` });
   if (projectName) fields.push({ type: "mrkdwn", text: `*프로젝트*\n:file_folder: ${projectName}` });
   if (goalName) fields.push({ type: "mrkdwn", text: `*목표*\n:dart: ${goalName}` });
@@ -148,7 +162,7 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `${priorityEmoji} 새 이슈: ${identifier} - ${title} → ${assigneeName ?? "미할당"}`,
+    text: `${priorityEmoji} 새 이슈: ${identifier} - ${title} → ${assigneeName ? slackMention(assigneeName) : "미할당"}`,
     blocks,
   };
 }
@@ -164,7 +178,7 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
   const lines = [`:white_check_mark: *${identifier} 완료*`, `*${title}*`];
   if (description) lines.push(description.slice(0, 150));
   const meta: string[] = [];
-  if (assigneeName) meta.push(`:bust_in_silhouette: ${assigneeName}`);
+  if (assigneeName) meta.push(`:bust_in_silhouette: ${slackMention(assigneeName)}`);
   if (projectName) meta.push(`:file_folder: ${projectName}`);
   if (meta.length > 0) lines.push(meta.join(" · "));
 
@@ -199,7 +213,7 @@ export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
   if (title) lines.push(`*${title}*`);
   if (description) lines.push(description.slice(0, 150));
   const meta: string[] = [];
-  if (assigneeName) meta.push(`:bust_in_silhouette: ${assigneeName}`);
+  if (assigneeName) meta.push(`:bust_in_silhouette: ${slackMention(assigneeName)}`);
   if (projectName) meta.push(`:file_folder: ${projectName}`);
   if (meta.length > 0) lines.push(meta.join(" · "));
 
@@ -227,7 +241,7 @@ export function formatApprovalCreated(event: PluginEvent): SlackMessage {
   const issueIds = Array.isArray(p.issueIds) ? p.issueIds : [];
 
   const fields: Array<{ type: string; text: string }> = [];
-  if (agentName) fields.push({ type: "mrkdwn", text: `*요청 에이전트*\n:robot_face: ${agentName}` });
+  if (agentName) fields.push({ type: "mrkdwn", text: `*요청 에이전트*\n:robot_face: ${slackMention(agentName)}` });
   fields.push({ type: "mrkdwn", text: `*유형*\n\`${approvalType}\`` });
   if (issueIds.length > 0) {
     fields.push({ type: "mrkdwn", text: `*관련 이슈*\n${issueIds.join(", ")}` });
@@ -318,7 +332,7 @@ export function formatAgentError(event: PluginEvent): SlackMessage {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `:warning: *에이전트 에러*\n:robot_face: *${agentName}*\n\`\`\`${errorMessage.slice(0, 500)}\`\`\``,
+          text: `:warning: *에이전트 에러*\n:robot_face: ${slackMention(agentName)}\n\`\`\`${errorMessage.slice(0, 500)}\`\`\``,
         },
       },
       contextFooter(event.occurredAt),
@@ -337,7 +351,7 @@ export function formatAgentConnected(event: PluginEvent): SlackMessage {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `:white_check_mark: *에이전트 온라인*\n:robot_face: *${agentName}* 연결됨`,
+          text: `:white_check_mark: *에이전트 온라인*\n:robot_face: ${slackMention(agentName)} 연결됨`,
         },
       },
       contextFooter(event.occurredAt),
@@ -359,7 +373,7 @@ export function formatBudgetThreshold(event: PluginEvent): SlackMessage {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `:chart_with_upwards_trend: *예산 임계값 도달*\n:robot_face: *${agentName}* — *${pct}%* 사용 ($${spent} / $${budget})`,
+          text: `:chart_with_upwards_trend: *예산 임계값 도달*\n:robot_face: ${slackMention(agentName)} — *${pct}%* 사용 ($${spent} / $${budget})`,
         },
       },
       contextFooter(event.occurredAt),
@@ -379,7 +393,7 @@ export function formatOnboardingMilestone(event: PluginEvent): SlackMessage {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `:tada: *마일스톤 달성*\n:robot_face: *${agentName}* — ${milestone}`,
+          text: `:tada: *마일스톤 달성*\n:robot_face: ${slackMention(agentName)} — ${milestone}`,
         },
       },
       contextFooter(event.occurredAt),
@@ -397,7 +411,6 @@ export function formatDailyDigest(stats: {
   tasksCompleted: number;
   tasksCreated: number;
   agentsActive: number;
-  totalCost: string;
   topAgent: string;
   agentStats?: Record<string, { completed: number; inProgress: number; created: number }>;
   completedIssues?: IssueItem[];
@@ -416,7 +429,6 @@ export function formatDailyDigest(stats: {
         { type: "mrkdwn", text: `*:white_check_mark: 완료*\n${stats.tasksCompleted}건` },
         { type: "mrkdwn", text: `*:inbox_tray: 생성*\n${stats.tasksCreated}건` },
         { type: "mrkdwn", text: `*:robot_face: 활성 에이전트*\n${stats.agentsActive}명` },
-        { type: "mrkdwn", text: `*:moneybag: 비용*\n$${stats.totalCost}` },
       ],
     },
   ];
@@ -430,7 +442,7 @@ export function formatDailyDigest(stats: {
         if (s.completed > 0) parts.push(`✅${s.completed}`);
         if (s.inProgress > 0) parts.push(`🔧${s.inProgress}`);
         if (s.created > 0) parts.push(`📥${s.created}`);
-        return `:robot_face: *${name}* — ${parts.join(" ")}`;
+        return `:robot_face: ${slackMention(name)} — ${parts.join(" ")}`;
       });
     if (agentLines.length > 0) {
       blocks.push({ type: "divider" });
@@ -444,7 +456,7 @@ export function formatDailyDigest(stats: {
   // Completed issues list
   if (stats.completedIssues && stats.completedIssues.length > 0) {
     const lines = stats.completedIssues
-      .map((i) => `✅ *${i.identifier}* ${i.title.slice(0, 50)} — ${i.agentName}`)
+      .map((i) => `✅ *${i.identifier}* ${i.title.slice(0, 50)} — ${slackMention(i.agentName)}`)
       .join("\n");
     blocks.push({ type: "divider" });
     blocks.push({
@@ -456,7 +468,7 @@ export function formatDailyDigest(stats: {
   // In-progress issues list
   if (stats.inProgressIssues && stats.inProgressIssues.length > 0) {
     const lines = stats.inProgressIssues
-      .map((i) => `🔧 *${i.identifier}* ${i.title.slice(0, 50)} — ${i.agentName}`)
+      .map((i) => `🔧 *${i.identifier}* ${i.title.slice(0, 50)} — ${slackMention(i.agentName)}`)
       .join("\n");
     blocks.push({
       type: "section",
@@ -467,18 +479,18 @@ export function formatDailyDigest(stats: {
   if (stats.topAgent) {
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: `:trophy: *MVP:* ${stats.topAgent}` },
+      text: { type: "mrkdwn", text: `:trophy: *MVP:* ${slackMention(stats.topAgent)}` },
     });
   }
 
   blocks.push({ type: "divider" });
   blocks.push({
     type: "context",
-    elements: [{ type: "mrkdwn", text: ":paperclip: *Paperclip* — 2시간 활동 요약" }],
+    elements: [{ type: "mrkdwn", text: ":paperclip: *Paperclip* — 활동 요약" }],
   });
 
   return {
-    text: `팀 활동 요약: ${stats.tasksCompleted}건 완료, ${stats.tasksCreated}건 생성, $${stats.totalCost} 사용`,
+    text: `팀 활동 요약: ${stats.tasksCompleted}건 완료, ${stats.tasksCreated}건 생성`,
     blocks,
   };
 }
@@ -567,7 +579,7 @@ export function formatEscalationMessage(escalation: EscalationRecord): SlackMess
   });
 
   return {
-    text: `:sos: ${escalation.agentName ?? "에이전트"} 에스컬레이션: ${escalation.reason}`,
+    text: `:sos: ${escalation.agentName ? slackMention(escalation.agentName) : "에이전트"} 에스컬레이션: ${escalation.reason}`,
     blocks,
   };
 }

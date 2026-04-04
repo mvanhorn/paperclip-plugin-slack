@@ -984,7 +984,6 @@ const plugin = definePlugin({
             tasksCompleted,
             tasksCreated,
             agentsActive,
-            totalCost,
             topAgent,
             agentStats,
             completedIssues: completedIssues.slice(0, 10),
