@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   definePlugin,
   runWorker,
@@ -55,6 +56,41 @@ let pluginCtx: PluginContext;
 let pluginToken: string;
 let pluginConfig: SlackConfig;
 let slackAdapter: SlackAdapter;
+
+// --- Slack signature verification ---
+
+let slackSigningSecret: string | null = null;
+
+function verifySlackSignature(
+  headers: Record<string, string | string[]>,
+  rawBody: string,
+): boolean {
+  if (!slackSigningSecret) return true; // skip if not configured
+
+  const timestamp = String(
+    headers["x-slack-request-timestamp"] ??
+    headers["X-Slack-Request-Timestamp"] ?? ""
+  );
+  const signature = String(
+    headers["x-slack-signature"] ??
+    headers["X-Slack-Signature"] ?? ""
+  );
+
+  if (!timestamp || !signature) return false;
+
+  // Reject requests older than 5 minutes to prevent replay attacks
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - Number(timestamp)) > 300) return false;
+
+  const baseString = `v0:${timestamp}:${rawBody}`;
+  const hmac = createHmac("sha256", slackSigningSecret)
+    .update(baseString)
+    .digest("hex");
+  const expected = `v0=${hmac}`;
+
+  if (expected.length !== signature.length) return false;
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+}
 
 // --- Helpers ---
 
@@ -365,6 +401,15 @@ const plugin = definePlugin({
 
     const token = await ctx.secrets.resolve(config.slackTokenRef);
     pluginToken = token;
+
+    // Resolve Slack signing secret for webhook signature verification
+    if (config.slackSigningSecretRef) {
+      try {
+        slackSigningSecret = await ctx.secrets.resolve(config.slackSigningSecretRef);
+      } catch {
+        ctx.logger.warn("Slack signing secret not configured — webhook signature verification disabled");
+      }
+    }
 
     // =========================================================================
     // PHASE 1: Escalation - using 3-arg ctx.tools.register with ToolRunContext
@@ -1221,7 +1266,14 @@ const plugin = definePlugin({
   // =========================================================================
 
   async onWebhook(input: PluginWebhookInput): Promise<void> {
+    // Verify Slack request signature (skip for url_verification challenge)
     const body = input.parsedBody as Record<string, unknown> | undefined;
+    const isVerificationChallenge = body?.type === "url_verification";
+
+    if (!isVerificationChallenge && !verifySlackSignature(input.headers, input.rawBody)) {
+      pluginCtx.logger.warn("Rejected webhook: invalid Slack signature");
+      return;
+    }
 
     // Slack Events API (url_verification + event callbacks)
     if (input.endpointKey === WEBHOOK_KEYS.slackEvents) {
