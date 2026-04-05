@@ -52,6 +52,13 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Secret UUID for your Slack Bot OAuth token. Create the secret in Settings → Secrets, then paste its UUID here.",
         default: DEFAULT_CONFIG.slackTokenRef,
       },
+      slackSigningSecretRef: {
+        type: "string",
+        format: "secret-ref",
+        title: "Slack Signing Secret (secret reference)",
+        description: "Secret UUID for your Slack app's Signing Secret. Required to verify that incoming webhooks are genuinely from Slack.",
+        default: DEFAULT_CONFIG.slackSigningSecretRef,
+      },
       defaultChannelId: {
         type: "string",
         title: "Default Slack Channel ID",
@@ -149,7 +156,7 @@ const manifest: PaperclipPluginManifestV1 = {
         default: DEFAULT_CONFIG.maxAgentsPerThread,
       },
     },
-    required: ["slackTokenRef", "defaultChannelId"],
+    required: ["slackTokenRef", "slackSigningSecretRef", "defaultChannelId"],
   },
   jobs: [
     {
