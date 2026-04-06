@@ -57,6 +57,73 @@ function slackMention(name: string): string {
   return uid ? `<@${uid}>` : name;
 }
 
+// --- Execution result extraction ---
+
+const EXEC_RESULT_HEADERS = [
+  /^##\s*실행\s*결과/m,
+  /^##\s*Self-Verification/m,
+  /^##\s*판단/m,
+  /^##\s*Execution Result/mi,
+];
+
+/**
+ * Extract "실행 결과" / "Self-Verification" / "판단" sections from markdown description.
+ * Returns { summary, executionResult } where summary is the first ~300 chars before the result section,
+ * and executionResult is the full extracted section(s).
+ */
+export function extractExecutionResult(description: string | null): {
+  summary: string;
+  executionResult: string | null;
+} {
+  if (!description) return { summary: "", executionResult: null };
+
+  // Find the earliest matching header
+  let earliestIdx = -1;
+  for (const re of EXEC_RESULT_HEADERS) {
+    const match = re.exec(description);
+    if (match && (earliestIdx === -1 || match.index < earliestIdx)) {
+      earliestIdx = match.index;
+    }
+  }
+
+  if (earliestIdx === -1) {
+    // No execution result section found — return truncated summary
+    return { summary: description.slice(0, 300), executionResult: null };
+  }
+
+  const summary = description.slice(0, Math.min(earliestIdx, 300)).trim();
+  const executionResult = description.slice(earliestIdx).trim();
+  return { summary, executionResult };
+}
+
+/**
+ * Format execution result as Slack blocks (mrkdwn sections, max 3000 chars per block).
+ */
+export function formatExecutionResultBlocks(executionResult: string): Array<Record<string, unknown>> {
+  const blocks: Array<Record<string, unknown>> = [];
+  // Slack section text limit is 3000 chars
+  const MAX_BLOCK_LEN = 2900;
+  let remaining = executionResult;
+
+  // Add a divider before execution results
+  blocks.push({ type: "divider" });
+  blocks.push({
+    type: "context",
+    elements: [{ type: "mrkdwn", text: ":brain: *에이전트 실행 결과*" }],
+  });
+
+  while (remaining.length > 0) {
+    const chunk = remaining.slice(0, MAX_BLOCK_LEN);
+    remaining = remaining.slice(MAX_BLOCK_LEN);
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: chunk },
+    });
+  }
+
+  return blocks;
+}
+
 function contextFooter(timestamp?: string): Record<string, unknown> {
   const elements: Array<Record<string, unknown>> = [
     { type: "mrkdwn", text: ":paperclip: *Paperclip*" },
@@ -175,8 +242,10 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
   const assigneeName = p.assigneeName ? String(p.assigneeName) : null;
   const projectName = p.projectName ? String(p.projectName) : null;
 
+  const { summary, executionResult } = extractExecutionResult(description);
+
   const lines = [`:white_check_mark: *${identifier} 완료*`, `*${title}*`];
-  if (description) lines.push(description.slice(0, 150));
+  if (summary) lines.push(summary.slice(0, 300));
   const meta: string[] = [];
   if (assigneeName) meta.push(`:bust_in_silhouette: ${slackMention(assigneeName)}`);
   if (projectName) meta.push(`:file_folder: ${projectName}`);
@@ -188,8 +257,14 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
       text: { type: "mrkdwn", text: lines.join("\n") },
       accessory: viewButton("대시보드", `${dashboardBase}/issues/${event.entityId}`),
     },
-    contextFooter(event.occurredAt),
   ];
+
+  // Append execution result blocks if present
+  if (executionResult) {
+    blocks.push(...formatExecutionResultBlocks(executionResult));
+  }
+
+  blocks.push(contextFooter(event.occurredAt));
 
   return {
     text: `:white_check_mark: 완료: ${identifier} - ${title}`,
@@ -209,9 +284,11 @@ export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
   const statusEmoji = STATUS_EMOJI[status] ?? ":hammer_and_wrench:";
   const statusKr = STATUS_KR[status] ?? status;
 
+  const { summary, executionResult } = extractExecutionResult(description);
+
   const lines = [`${statusEmoji} *${identifier}* → ${statusKr}`];
   if (title) lines.push(`*${title}*`);
-  if (description) lines.push(description.slice(0, 150));
+  if (summary) lines.push(summary.slice(0, 300));
   const meta: string[] = [];
   if (assigneeName) meta.push(`:bust_in_silhouette: ${slackMention(assigneeName)}`);
   if (projectName) meta.push(`:file_folder: ${projectName}`);
@@ -222,8 +299,14 @@ export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
       type: "section",
       text: { type: "mrkdwn", text: lines.join("\n") },
     },
-    contextFooter(event.occurredAt),
   ];
+
+  // Append execution result blocks if present
+  if (executionResult) {
+    blocks.push(...formatExecutionResultBlocks(executionResult));
+  }
+
+  blocks.push(contextFooter(event.occurredAt));
 
   return {
     text: `${statusEmoji} ${identifier} → ${statusKr}: ${title}`,
@@ -608,6 +691,106 @@ export function formatEscalationResolved(
           text: `${emoji} *에스컬레이션 ${label}* — <@${userId}>`,
         },
       },
+    ],
+  };
+}
+
+// --- Goal / Project / Comment / Run formatters ---
+
+export function formatGoalCreated(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const title = String(p.title ?? "Untitled");
+  const description = p.description ? String(p.description).slice(0, 300) : "";
+
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `:dart: *새 목표: ${title}*${description ? `\n${description}` : ""}` },
+      accessory: viewButton("대시보드", `${dashboardBase}/goals/${event.entityId}`),
+    },
+    contextFooter(event.occurredAt),
+  ];
+
+  return { text: `:dart: 새 목표: ${title}`, blocks };
+}
+
+export function formatGoalUpdated(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const title = String(p.title ?? "");
+  const status = p.status ? String(p.status) : null;
+  const statusEmoji = status ? (STATUS_EMOJI[status] ?? ":arrows_counterclockwise:") : ":arrows_counterclockwise:";
+  const statusKr = status ? (STATUS_KR[status] ?? status) : "업데이트";
+
+  return {
+    text: `${statusEmoji} 목표 업데이트: ${title} → ${statusKr}`,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: `${statusEmoji} *목표 업데이트* → ${statusKr}\n${title}` } },
+    ],
+  };
+}
+
+export function formatProjectCreated(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const title = String(p.title ?? p.name ?? "Untitled");
+
+  return {
+    text: `:file_folder: 프로젝트 생성: ${title}`,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: `:file_folder: *프로젝트 생성:* ${title}` } },
+    ],
+  };
+}
+
+export function formatProjectUpdated(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const title = String(p.title ?? p.name ?? "");
+
+  return {
+    text: `:file_folder: 프로젝트 업데이트: ${title}`,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: `:file_folder: *프로젝트 업데이트:* ${title}` } },
+    ],
+  };
+}
+
+export function formatCommentCreated(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const body = p.body ? String(p.body).slice(0, 500) : "";
+  const authorName = p.authorName ? String(p.authorName) : (p.agentName ? String(p.agentName) : "");
+  const identifier = p.issueIdentifier ? String(p.issueIdentifier) : "";
+  const author = authorName ? slackMention(authorName) : event.actorId;
+
+  return {
+    text: `💬 ${author}: ${body.slice(0, 100)}`,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: `:speech_balloon: ${author}${identifier ? ` (${identifier})` : ""}\n${body}` } },
+    ],
+  };
+}
+
+export function formatAgentRunStarted(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const agentName = p.agentName ? String(p.agentName) : (p.name ? String(p.name) : "에이전트");
+  const issueTitle = p.issueTitle ? String(p.issueTitle) : "";
+
+  return {
+    text: `⚡ ${agentName} 착수${issueTitle ? `: ${issueTitle}` : ""}`,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: `:zap: ${slackMention(agentName)} *착수*${issueTitle ? ` — ${issueTitle}` : ""}` } },
+    ],
+  };
+}
+
+export function formatApprovalDecided(event: PluginEvent): SlackMessage {
+  const p = event.payload as Payload;
+  const decision = String(p.decision ?? p.status ?? "decided");
+  const emoji = decision === "approved" ? ":white_check_mark:" : ":x:";
+  const label = decision === "approved" ? "승인" : "거부";
+
+  return {
+    text: `${emoji} 승인 ${label}`,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: `${emoji} *승인 ${label}*` } },
     ],
   };
 }

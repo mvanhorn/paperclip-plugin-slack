@@ -27,6 +27,8 @@ export const STATE_KEYS = {
   handoff: (id: string) => `handoff-${id}`,
   slackChannel: "slack-channel",
   threadIssue: (id: string) => `thread-issue-${id}`,
+  threadGoal: (id: string) => `thread-goal-${id}`,
+  threadProject: (id: string) => `thread-project-${id}`,
   dailyCost: (date: string) => `daily-cost-${date}`,
   dailyAgentCosts: (date: string) => `daily-agent-costs-${date}`,
   firstRunNotified: (id: string) => `first-run-notified-${id}`,

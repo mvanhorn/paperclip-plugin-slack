@@ -36,6 +36,15 @@ import {
   formatDailyDigest,
   formatEscalationMessage,
   formatEscalationResolved,
+  extractExecutionResult,
+  formatExecutionResultBlocks,
+  formatGoalCreated,
+  formatGoalUpdated,
+  formatProjectCreated,
+  formatProjectUpdated,
+  formatCommentCreated,
+  formatAgentRunStarted,
+  formatApprovalDecided,
 } from "./formatters.js";
 import { processMediaFile, isMediaFile } from "./media-pipeline.js";
 import {
@@ -785,6 +794,7 @@ const plugin = definePlugin({
     }
 
     // issue.updated — all status changes go to the same thread as issue.created
+    // Enhanced: also sends execution result as a separate thread reply when present
     ctx.events.on("issue.updated", async (event: PluginEvent) => {
       const payload = event.payload as Record<string, unknown>;
       const status = payload.status ? String(payload.status) : null;
@@ -801,9 +811,39 @@ const plugin = definePlugin({
       ctx.logger.info("issue.updated thread lookup", { entityId: event.entityId, stateKey, threadTs, status });
 
       if (status === "done" && config.notifyOnIssueDone) {
-        await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
+        const result = await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
+        // Post execution result as a separate reply if it exceeds Slack block limits
+        const description = payload.description ? String(payload.description) : null;
+        const { executionResult } = extractExecutionResult(description);
+        if (executionResult && executionResult.length > 2900 && threadTs) {
+          const fallback = config.defaultChannelId;
+          const channelId = await resolveChannel(ctx, event.companyId, fallback);
+          if (channelId) {
+            const resultBlocks = formatExecutionResultBlocks(executionResult);
+            await postMessage(ctx, token, channelId, {
+              text: `실행 결과 (${String(payload.identifier ?? event.entityId)})`,
+              blocks: resultBlocks,
+            }, { threadTs });
+          }
+        }
       } else if (status !== "done" && (config as Record<string, unknown>).notifyOnIssueUpdated !== false) {
         await notify(event, formatIssueStatusChanged, undefined, threadTs ? { threadTs } : undefined);
+        // For in_review with execution results, also post a separate reply
+        if (status === "in_review" && threadTs) {
+          const description = payload.description ? String(payload.description) : null;
+          const { executionResult } = extractExecutionResult(description);
+          if (executionResult) {
+            const fallback = config.defaultChannelId;
+            const channelId = await resolveChannel(ctx, event.companyId, fallback);
+            if (channelId) {
+              const resultBlocks = formatExecutionResultBlocks(executionResult);
+              await postMessage(ctx, token, channelId, {
+                text: `실행 결과 (${String(payload.identifier ?? event.entityId)})`,
+                blocks: resultBlocks,
+              }, { threadTs });
+            }
+          }
+        }
       }
     });
 
@@ -815,7 +855,21 @@ const plugin = definePlugin({
 
     if (config.notifyOnAgentError) {
       ctx.events.on("agent.run.failed", async (event: PluginEvent) => {
+        // Post to errors channel
         await notify(event, formatAgentError, config.errorsChannelId);
+        // Also post to the issue thread if available
+        const payload = event.payload as Record<string, unknown>;
+        const issueId = payload.issueId ? String(payload.issueId) : null;
+        if (issueId) {
+          const threadTs = await ctx.state.get({
+            scopeKind: "company",
+            scopeId: event.companyId,
+            stateKey: STATE_KEYS.threadIssue(issueId),
+          });
+          if (threadTs) {
+            await notify(event, formatAgentError, undefined, { threadTs: String(threadTs) });
+          }
+        }
       });
     }
 
@@ -872,6 +926,102 @@ const plugin = definePlugin({
         await ctx.metrics.write("slack.budget_alerts.sent", 1, { threshold: String(bucket) });
       });
     }
+
+    // =========================================================================
+    // Goal & Project — thread-based notifications
+    // =========================================================================
+
+    ctx.events.on("goal.created", async (event: PluginEvent) => {
+      const result = await notify(event, formatGoalCreated);
+      if (result?.ok && result.ts) {
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadGoal(event.entityId ?? "") },
+          result.ts,
+        );
+      }
+    });
+
+    ctx.events.on("goal.updated", async (event: PluginEvent) => {
+      const threadTs = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: STATE_KEYS.threadGoal(event.entityId ?? ""),
+      });
+      await notify(event, formatGoalUpdated, undefined, threadTs ? { threadTs: String(threadTs) } : undefined);
+    });
+
+    ctx.events.on("project.created", async (event: PluginEvent) => {
+      const payload = event.payload as Record<string, unknown>;
+      // Try to thread under the parent goal
+      const goalId = payload.goalId ? String(payload.goalId) : null;
+      let threadTs: string | null = null;
+      if (goalId) {
+        const raw = await ctx.state.get({
+          scopeKind: "company",
+          scopeId: event.companyId,
+          stateKey: STATE_KEYS.threadGoal(goalId),
+        });
+        threadTs = raw ? String(raw) : null;
+      }
+      const result = await notify(event, formatProjectCreated, undefined, threadTs ? { threadTs } : undefined);
+      // Save project thread (use its own message or goal thread)
+      if (result?.ok && result.ts) {
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadProject(event.entityId ?? "") },
+          threadTs ?? result.ts,
+        );
+      }
+    });
+
+    ctx.events.on("project.updated", async (event: PluginEvent) => {
+      const threadTs = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: STATE_KEYS.threadProject(event.entityId ?? ""),
+      });
+      await notify(event, formatProjectUpdated, undefined, threadTs ? { threadTs: String(threadTs) } : undefined);
+    });
+
+    // =========================================================================
+    // Issue comments — thread reply under the issue
+    // =========================================================================
+
+    ctx.events.on("issue.comment.created", async (event: PluginEvent) => {
+      const threadTs = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: STATE_KEYS.threadIssue(event.entityId ?? ""),
+      });
+      if (threadTs) {
+        await notify(event, formatCommentCreated, undefined, { threadTs: String(threadTs) });
+      }
+    });
+
+    // =========================================================================
+    // Agent run started — thread reply under the issue being worked on
+    // =========================================================================
+
+    ctx.events.on("agent.run.started", async (event: PluginEvent) => {
+      const payload = event.payload as Record<string, unknown>;
+      const issueId = payload.issueId ? String(payload.issueId) : event.entityId;
+      if (!issueId) return;
+      const threadTs = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: STATE_KEYS.threadIssue(issueId),
+      });
+      if (threadTs) {
+        await notify(event, formatAgentRunStarted, undefined, { threadTs: String(threadTs) });
+      }
+    });
+
+    // =========================================================================
+    // Approval decided — thread reply
+    // =========================================================================
+
+    ctx.events.on("approval.decided", async (event: PluginEvent) => {
+      await notify(event, formatApprovalDecided, config.approvalsChannelId);
+    });
 
     // =========================================================================
     // Per-company channel overrides
@@ -1243,13 +1393,15 @@ const plugin = definePlugin({
     });
 
     // Collect events for watch checking (Phase 5)
-    const watchableEvents: Array<"issue.created" | "issue.updated" | "agent.run.failed" | "agent.run.finished" | "agent.status_changed" | "cost_event.created" | "approval.created"> = [
-      "issue.created", "issue.updated",
-      "agent.run.failed", "agent.run.finished", "agent.status_changed",
-      "cost_event.created", "approval.created",
+    const watchableEvents: Array<string> = [
+      "issue.created", "issue.updated", "issue.comment.created",
+      "agent.run.started", "agent.run.failed", "agent.run.finished", "agent.status_changed",
+      "goal.created", "goal.updated",
+      "project.created", "project.updated",
+      "cost_event.created", "approval.created", "approval.decided",
     ];
     for (const eventType of watchableEvents) {
-      ctx.events.on(eventType, async (event: PluginEvent) => {
+      ctx.events.on(eventType as Parameters<typeof ctx.events.on>[0], async (event: PluginEvent) => {
         const recentEventsRaw = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
