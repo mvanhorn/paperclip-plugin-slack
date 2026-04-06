@@ -753,34 +753,6 @@ export function formatProjectUpdated(event: PluginEvent): SlackMessage {
   };
 }
 
-export function formatCommentCreated(event: PluginEvent): SlackMessage {
-  const p = event.payload as Payload;
-  const body = p.body ? String(p.body).slice(0, 500) : "";
-  const authorName = p.authorName ? String(p.authorName) : (p.agentName ? String(p.agentName) : "");
-  const identifier = p.issueIdentifier ? String(p.issueIdentifier) : "";
-  const author = authorName ? slackMention(authorName) : event.actorId;
-
-  return {
-    text: `💬 ${author}: ${body.slice(0, 100)}`,
-    blocks: [
-      { type: "section", text: { type: "mrkdwn", text: `:speech_balloon: ${author}${identifier ? ` (${identifier})` : ""}\n${body}` } },
-    ],
-  };
-}
-
-export function formatAgentRunStarted(event: PluginEvent): SlackMessage {
-  const p = event.payload as Payload;
-  const agentName = p.agentName ? String(p.agentName) : (p.name ? String(p.name) : "에이전트");
-  const issueTitle = p.issueTitle ? String(p.issueTitle) : "";
-
-  return {
-    text: `⚡ ${agentName} 착수${issueTitle ? `: ${issueTitle}` : ""}`,
-    blocks: [
-      { type: "section", text: { type: "mrkdwn", text: `:zap: ${slackMention(agentName)} *착수*${issueTitle ? ` — ${issueTitle}` : ""}` } },
-    ],
-  };
-}
-
 export function formatApprovalDecided(event: PluginEvent): SlackMessage {
   const p = event.payload as Payload;
   const decision = String(p.decision ?? p.status ?? "decided");

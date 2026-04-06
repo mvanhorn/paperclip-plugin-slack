@@ -42,8 +42,6 @@ import {
   formatGoalUpdated,
   formatProjectCreated,
   formatProjectUpdated,
-  formatCommentCreated,
-  formatAgentRunStarted,
   formatApprovalDecided,
 } from "./formatters.js";
 import { processMediaFile, isMediaFile } from "./media-pipeline.js";
@@ -985,35 +983,6 @@ const plugin = definePlugin({
     // =========================================================================
     // Issue comments — thread reply under the issue
     // =========================================================================
-
-    ctx.events.on("issue.comment.created", async (event: PluginEvent) => {
-      const threadTs = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: event.companyId,
-        stateKey: STATE_KEYS.threadIssue(event.entityId ?? ""),
-      });
-      if (threadTs) {
-        await notify(event, formatCommentCreated, undefined, { threadTs: String(threadTs) });
-      }
-    });
-
-    // =========================================================================
-    // Agent run started — thread reply under the issue being worked on
-    // =========================================================================
-
-    ctx.events.on("agent.run.started", async (event: PluginEvent) => {
-      const payload = event.payload as Record<string, unknown>;
-      const issueId = payload.issueId ? String(payload.issueId) : event.entityId;
-      if (!issueId) return;
-      const threadTs = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: event.companyId,
-        stateKey: STATE_KEYS.threadIssue(issueId),
-      });
-      if (threadTs) {
-        await notify(event, formatAgentRunStarted, undefined, { threadTs: String(threadTs) });
-      }
-    });
 
     // =========================================================================
     // Approval decided — thread reply
