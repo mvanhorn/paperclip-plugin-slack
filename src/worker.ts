@@ -929,8 +929,11 @@ const plugin = definePlugin({
     // Goal & Project — thread-based notifications
     // =========================================================================
 
+    // Goal/Project → #_general (큰 주제는 공지 채널)
+    const GENERAL_CHANNEL = "C05RA9YNLQH"; // #_general
+
     ctx.events.on("goal.created", async (event: PluginEvent) => {
-      const result = await notify(event, formatGoalCreated);
+      const result = await notify(event, formatGoalCreated, GENERAL_CHANNEL);
       if (result?.ok && result.ts) {
         await ctx.state.set(
           { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadGoal(event.entityId ?? "") },
@@ -945,7 +948,7 @@ const plugin = definePlugin({
         scopeId: event.companyId,
         stateKey: STATE_KEYS.threadGoal(event.entityId ?? ""),
       });
-      await notify(event, formatGoalUpdated, undefined, threadTs ? { threadTs: String(threadTs) } : undefined);
+      await notify(event, formatGoalUpdated, GENERAL_CHANNEL, threadTs ? { threadTs: String(threadTs) } : undefined);
     });
 
     ctx.events.on("project.created", async (event: PluginEvent) => {
@@ -961,7 +964,7 @@ const plugin = definePlugin({
         });
         threadTs = raw ? String(raw) : null;
       }
-      const result = await notify(event, formatProjectCreated, undefined, threadTs ? { threadTs } : undefined);
+      const result = await notify(event, formatProjectCreated, GENERAL_CHANNEL, threadTs ? { threadTs } : undefined);
       // Save project thread (use its own message or goal thread)
       if (result?.ok && result.ts) {
         await ctx.state.set(
@@ -977,7 +980,7 @@ const plugin = definePlugin({
         scopeId: event.companyId,
         stateKey: STATE_KEYS.threadProject(event.entityId ?? ""),
       });
-      await notify(event, formatProjectUpdated, undefined, threadTs ? { threadTs: String(threadTs) } : undefined);
+      await notify(event, formatProjectUpdated, GENERAL_CHANNEL, threadTs ? { threadTs: String(threadTs) } : undefined);
     });
 
     // =========================================================================
