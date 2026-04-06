@@ -57,6 +57,12 @@ function slackMention(name: string): string {
   return uid ? `<@${uid}>` : name;
 }
 
+/** Format issue identifier as clickable Slack link: <url|DGG-123> */
+function issueLink(identifier: string, entityId?: string): string {
+  const id = entityId ?? identifier;
+  return `<${dashboardBase}/DGG/issues/${identifier}|${identifier}>`;
+}
+
 // --- Execution result extraction ---
 
 const EXEC_RESULT_HEADERS = [
@@ -197,8 +203,8 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
   const statusKr = status ? (STATUS_KR[status] ?? status) : "";
 
   // Header line
-  let header = `${priorityEmoji} *새 이슈: ${identifier}*`;
-  if (parentIdentifier) header += ` (상위: ${parentIdentifier})`;
+  let header = `${priorityEmoji} *새 이슈: ${issueLink(identifier)}*`;
+  if (parentIdentifier) header += ` (상위: ${issueLink(parentIdentifier)})`;
   header += `\n*${title}*`;
 
   // Description (truncated)
@@ -229,7 +235,7 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `${priorityEmoji} 새 이슈: ${identifier} - ${title} → ${assigneeName ? slackMention(assigneeName) : "미할당"}`,
+    text: `${priorityEmoji} 새 이슈: ${issueLink(identifier)} - ${title} → ${assigneeName ? slackMention(assigneeName) : "미할당"}`,
     blocks,
   };
 }
@@ -244,7 +250,7 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
 
   const { summary, executionResult } = extractExecutionResult(description);
 
-  const lines = [`:white_check_mark: *${identifier} 완료*`, `*${title}*`];
+  const lines = [`:white_check_mark: *${issueLink(identifier)} 완료*`, `*${title}*`];
   if (summary) lines.push(summary.slice(0, 300));
   const meta: string[] = [];
   if (assigneeName) meta.push(`:bust_in_silhouette: ${slackMention(assigneeName)}`);
@@ -267,7 +273,7 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `:white_check_mark: 완료: ${identifier} - ${title}`,
+    text: `:white_check_mark: 완료: ${issueLink(identifier)} - ${title}`,
     blocks,
   };
 }
@@ -286,7 +292,7 @@ export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
 
   const { summary, executionResult } = extractExecutionResult(description);
 
-  const lines = [`${statusEmoji} *${identifier}* → ${statusKr}`];
+  const lines = [`${statusEmoji} *${issueLink(identifier)}* → ${statusKr}`];
   if (title) lines.push(`*${title}*`);
   if (summary) lines.push(summary.slice(0, 300));
   const meta: string[] = [];
@@ -309,7 +315,7 @@ export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `${statusEmoji} ${identifier} → ${statusKr}: ${title}`,
+    text: `${statusEmoji} ${issueLink(identifier)} → ${statusKr}: ${title}`,
     blocks,
   };
 }
