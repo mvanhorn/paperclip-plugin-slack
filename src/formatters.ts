@@ -202,20 +202,15 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
   const priorityKr = priority ? (PRIORITY_KR[priority] ?? priority) : null;
   const statusKr = status ? (STATUS_KR[status] ?? status) : "";
 
-  // Header line
-  let header = `${priorityEmoji} *새 이슈: ${issueLink(identifier)}*`;
-  if (parentIdentifier) header += ` (상위: ${issueLink(parentIdentifier)})`;
-  header += `\n*${title}*`;
-
-  // Description (truncated)
+  const detailLines = [title ? `*${title}*` : issueLink(identifier)];
   if (description) {
-    header += `\n${description.slice(0, 300)}`;
+    detailLines.push(description.slice(0, 300));
   }
 
   const blocks: Array<Record<string, unknown>> = [
     {
       type: "section",
-      text: { type: "mrkdwn", text: header },
+      text: { type: "mrkdwn", text: detailLines.join("\n") },
       accessory: viewButton("대시보드", `${dashboardBase}/issues/${event.entityId}`),
     },
   ];
@@ -234,8 +229,12 @@ export function formatIssueCreated(event: PluginEvent): SlackMessage {
 
   blocks.push(contextFooter(event.occurredAt));
 
+  let text = `${priorityEmoji} 새 이슈: ${issueLink(identifier)}`;
+  if (parentIdentifier) text += ` (상위: ${issueLink(parentIdentifier)})`;
+  text += ` → ${assigneeName ? slackMention(assigneeName) : "미할당"}`;
+
   return {
-    text: `${priorityEmoji} 새 이슈: ${issueLink(identifier)} - ${title} → ${assigneeName ? slackMention(assigneeName) : "미할당"}`,
+    text,
     blocks,
   };
 }
@@ -250,17 +249,17 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
 
   const { summary, executionResult } = extractExecutionResult(description);
 
-  const lines = [`:white_check_mark: *${issueLink(identifier)} 완료*`, `*${title}*`];
-  if (summary) lines.push(summary.slice(0, 300));
+  const detailLines = [title ? `*${title}*` : issueLink(identifier)];
+  if (summary) detailLines.push(summary.slice(0, 300));
   const meta: string[] = [];
   if (assigneeName) meta.push(`:bust_in_silhouette: ${slackMention(assigneeName)}`);
   if (projectName) meta.push(`:file_folder: ${projectName}`);
-  if (meta.length > 0) lines.push(meta.join(" · "));
+  if (meta.length > 0) detailLines.push(meta.join(" · "));
 
   const blocks: Array<Record<string, unknown>> = [
     {
       type: "section",
-      text: { type: "mrkdwn", text: lines.join("\n") },
+      text: { type: "mrkdwn", text: detailLines.join("\n") },
       accessory: viewButton("대시보드", `${dashboardBase}/issues/${event.entityId}`),
     },
   ];
@@ -273,7 +272,7 @@ export function formatIssueDone(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `:white_check_mark: 완료: ${issueLink(identifier)} - ${title}`,
+    text: `:white_check_mark: 완료: ${issueLink(identifier)}`,
     blocks,
   };
 }
@@ -292,18 +291,22 @@ export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
 
   const { summary, executionResult } = extractExecutionResult(description);
 
-  const lines = [`${statusEmoji} *${issueLink(identifier)}* → ${statusKr}`];
-  if (title) lines.push(`*${title}*`);
-  if (summary) lines.push(summary.slice(0, 300));
+  const detailLines: string[] = [];
+  if (title) {
+    detailLines.push(`*${title}*`);
+  } else {
+    detailLines.push(issueLink(identifier));
+  }
+  if (summary) detailLines.push(summary.slice(0, 300));
   const meta: string[] = [];
   if (assigneeName) meta.push(`:bust_in_silhouette: ${slackMention(assigneeName)}`);
   if (projectName) meta.push(`:file_folder: ${projectName}`);
-  if (meta.length > 0) lines.push(meta.join(" · "));
+  if (meta.length > 0) detailLines.push(meta.join(" · "));
 
   const blocks: Array<Record<string, unknown>> = [
     {
       type: "section",
-      text: { type: "mrkdwn", text: lines.join("\n") },
+      text: { type: "mrkdwn", text: detailLines.join("\n") },
     },
   ];
 
@@ -315,7 +318,7 @@ export function formatIssueStatusChanged(event: PluginEvent): SlackMessage {
   blocks.push(contextFooter(event.occurredAt));
 
   return {
-    text: `${statusEmoji} ${issueLink(identifier)} → ${statusKr}: ${title}`,
+    text: `${statusEmoji} ${issueLink(identifier)} → ${statusKr}`,
     blocks,
   };
 }
