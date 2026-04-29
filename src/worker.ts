@@ -843,7 +843,10 @@ const plugin = definePlugin({
 
       ctx.events.on("agent.run.finished", async (event: PluginEvent) => {
         const payload = event.payload as Record<string, unknown>;
-        const key = STATE_KEYS.firstRunNotified(event.entityId ?? "");
+        // Dedup on agent id, not run id — event.entityId is the run UUID for
+        // agent.run.finished, so using it produces a unique key every run.
+        const agentId = String(payload.agentId ?? event.entityId ?? "");
+        const key = STATE_KEYS.firstRunNotified(agentId);
         const alreadyNotified = await ctx.state.get({
           scopeKind: "company",
           scopeId: event.companyId,
@@ -857,7 +860,11 @@ const plugin = definePlugin({
         );
         const milestoneEvent = {
           ...event,
-          payload: { ...payload, milestone: "first successful run" },
+          payload: {
+            ...payload,
+            agentName: String(payload.agentName ?? payload.name ?? agentId),
+            milestone: "first successful run",
+          },
         };
         await notify(milestoneEvent, formatOnboardingMilestone, config.pipelineChannelId);
       });
