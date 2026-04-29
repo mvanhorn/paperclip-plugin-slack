@@ -386,6 +386,11 @@ const plugin = definePlugin({
   async setup(ctx) {
     const rawConfig = await ctx.config.get();
     const config = rawConfig as unknown as SlackConfig;
+    // Always reads the current persisted config so flag changes (e.g.
+    // toggling notifyOnAgentConnected) take effect without restarting the
+    // plugin worker.
+    const getConfig = async (): Promise<SlackConfig> =>
+      (await ctx.config.get()) as unknown as SlackConfig;
 
     pluginCtx = ctx;
     pluginConfig = config;
@@ -796,103 +801,107 @@ const plugin = definePlugin({
     // Core event subscriptions (existing notifications)
     // =========================================================================
 
-    if (config.notifyOnIssueCreated) {
-      ctx.events.on("issue.created", async (event: PluginEvent) => {
-        const result = await notify(event, formatIssueCreated);
-        if (result?.ok && result.ts) {
-          await ctx.state.set(
-            { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadIssue(event.entityId ?? "") },
-            result.ts,
-          );
-        }
-      });
-    }
-
-    if (config.notifyOnIssueDone) {
-      ctx.events.on("issue.updated", async (event: PluginEvent) => {
-        const payload = event.payload as Record<string, unknown>;
-        if (payload.status !== "done") return;
-        const threadTs = await ctx.state.get({
-          scopeKind: "company",
-          scopeId: event.companyId,
-          stateKey: STATE_KEYS.threadIssue(event.entityId ?? ""),
-        }) as string | null;
-        await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
-      });
-    }
-
-    if (config.notifyOnApprovalCreated) {
-      ctx.events.on("approval.created", async (event: PluginEvent) => {
-        await notify(event, formatApprovalCreated, config.approvalsChannelId);
-      });
-    }
-
-    if (config.notifyOnAgentError) {
-      ctx.events.on("agent.run.failed", async (event: PluginEvent) => {
-        await notify(event, formatAgentError, config.errorsChannelId);
-      });
-    }
-
-    if (config.notifyOnAgentConnected) {
-      ctx.events.on("agent.status_changed", async (event: PluginEvent) => {
-        const payload = event.payload as Record<string, unknown>;
-        if (payload.status === "active" || payload.status === "online") {
-          await notify(event, formatAgentConnected, config.pipelineChannelId);
-        }
-      });
-
-      ctx.events.on("agent.run.finished", async (event: PluginEvent) => {
-        const payload = event.payload as Record<string, unknown>;
-        // Dedup on agent id, not run id — event.entityId is the run UUID for
-        // agent.run.finished, so using it produces a unique key every run.
-        const agentId = String(payload.agentId ?? event.entityId ?? "");
-        const key = STATE_KEYS.firstRunNotified(agentId);
-        const alreadyNotified = await ctx.state.get({
-          scopeKind: "company",
-          scopeId: event.companyId,
-          stateKey: key,
-        });
-        if (alreadyNotified) return;
-
+    // Handlers are always registered so that config changes (e.g. toggling
+    // notifyOnAgentConnected) take effect without a plugin restart.
+    ctx.events.on("issue.created", async (event: PluginEvent) => {
+      const live = await getConfig();
+      if (!live.notifyOnIssueCreated) return;
+      const result = await notify(event, formatIssueCreated);
+      if (result?.ok && result.ts) {
         await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: key },
-          true,
+          { scopeKind: "company", scopeId: event.companyId, stateKey: STATE_KEYS.threadIssue(event.entityId ?? "") },
+          result.ts,
         );
-        const milestoneEvent = {
-          ...event,
-          payload: {
-            ...payload,
-            agentName: String(payload.agentName ?? payload.name ?? agentId),
-            milestone: "first successful run",
-          },
-        };
-        await notify(milestoneEvent, formatOnboardingMilestone, config.pipelineChannelId);
+      }
+    });
+
+    ctx.events.on("issue.updated", async (event: PluginEvent) => {
+      const live = await getConfig();
+      if (!live.notifyOnIssueDone) return;
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.status !== "done") return;
+      const threadTs = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: STATE_KEYS.threadIssue(event.entityId ?? ""),
+      }) as string | null;
+      await notify(event, formatIssueDone, undefined, threadTs ? { threadTs } : undefined);
+    });
+
+    ctx.events.on("approval.created", async (event: PluginEvent) => {
+      const live = await getConfig();
+      if (!live.notifyOnApprovalCreated) return;
+      await notify(event, formatApprovalCreated, live.approvalsChannelId);
+    });
+
+    ctx.events.on("agent.run.failed", async (event: PluginEvent) => {
+      const live = await getConfig();
+      if (!live.notifyOnAgentError) return;
+      await notify(event, formatAgentError, live.errorsChannelId);
+    });
+
+    ctx.events.on("agent.status_changed", async (event: PluginEvent) => {
+      const live = await getConfig();
+      if (!live.notifyOnAgentConnected) return;
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.status === "active" || payload.status === "online") {
+        await notify(event, formatAgentConnected, live.pipelineChannelId);
+      }
+    });
+
+    ctx.events.on("agent.run.finished", async (event: PluginEvent) => {
+      const live = await getConfig();
+      if (!live.notifyOnAgentConnected) return;
+      const payload = event.payload as Record<string, unknown>;
+      // Dedup on agent id, not run id — event.entityId is the run UUID for
+      // agent.run.finished, so using it produces a unique key every run.
+      const agentId = String(payload.agentId ?? event.entityId ?? "");
+      const key = STATE_KEYS.firstRunNotified(agentId);
+      const alreadyNotified = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: key,
       });
-    }
+      if (alreadyNotified) return;
 
-    if (config.notifyOnBudgetThreshold) {
-      ctx.events.on("cost_event.created", async (event: PluginEvent) => {
-        const payload = event.payload as Record<string, unknown>;
-        const pct = Number(payload.percentUsed ?? 0);
-        if (pct < 80) return;
+      await ctx.state.set(
+        { scopeKind: "company", scopeId: event.companyId, stateKey: key },
+        true,
+      );
+      const milestoneEvent = {
+        ...event,
+        payload: {
+          ...payload,
+          agentName: String(payload.agentName ?? payload.name ?? agentId),
+          milestone: "first successful run",
+        },
+      };
+      await notify(milestoneEvent, formatOnboardingMilestone, live.pipelineChannelId);
+    });
 
-        const bucket = pct >= 100 ? 100 : pct >= 90 ? 90 : 80;
-        const key = STATE_KEYS.budgetAlert(event.entityId ?? "", bucket);
-        const alreadySent = await ctx.state.get({
-          scopeKind: "company",
-          scopeId: event.companyId,
-          stateKey: key,
-        });
-        if (alreadySent) return;
+    ctx.events.on("cost_event.created", async (event: PluginEvent) => {
+      const live = await getConfig();
+      if (!live.notifyOnBudgetThreshold) return;
+      const payload = event.payload as Record<string, unknown>;
+      const pct = Number(payload.percentUsed ?? 0);
+      if (pct < 80) return;
 
-        await ctx.state.set(
-          { scopeKind: "company", scopeId: event.companyId, stateKey: key },
-          true,
-        );
-        await notify(event, formatBudgetThreshold, config.pipelineChannelId);
-        await ctx.metrics.write("slack.budget_alerts.sent", 1, { threshold: String(bucket) });
+      const bucket = pct >= 100 ? 100 : pct >= 90 ? 90 : 80;
+      const key = STATE_KEYS.budgetAlert(event.entityId ?? "", bucket);
+      const alreadySent = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: event.companyId,
+        stateKey: key,
       });
-    }
+      if (alreadySent) return;
+
+      await ctx.state.set(
+        { scopeKind: "company", scopeId: event.companyId, stateKey: key },
+        true,
+      );
+      await notify(event, formatBudgetThreshold, live.pipelineChannelId);
+      await ctx.metrics.write("slack.budget_alerts.sent", 1, { threshold: String(bucket) });
+    });
 
     // =========================================================================
     // Per-company channel overrides
