@@ -134,7 +134,12 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
 2. Add the `chat:write` bot scope
 3. Enable **Interactivity** and point the Request URL to your Paperclip host's `slack-interactivity` webhook endpoint
 4. Install the app to your workspace and copy the Bot OAuth Token
-5. In Paperclip, go to **Settings -> Secrets** and create a new secret with your Bot OAuth Token. Copy the secret UUID.
+5. In Paperclip, create a **company secret** holding the Bot OAuth Token, by either:
+
+   - **UI:** Open any agent's **Configuration → Environment variables**, enter a name (e.g. `slack-bot-oauth-token`) and the Bot OAuth Token as the value, then click **Create / Seal**. The secret is created at the **company level** (not bound to that agent — despite the agent-context UI) and the returned UUID can be used from any plugin in the company.
+   - **REST API:** `POST /api/companies/{companyId}/secrets` with body `{"name": "slack-bot-oauth-token", "value": "<your-bot-oauth-token>", "provider": "local_encrypted"}`. The response contains the secret's UUID.
+
+   Copy the resulting secret UUID — you'll paste it into `slackTokenRef` in the next step.
 6. Install the plugin and configure the secret UUID in the `slackTokenRef` field + your default channel ID
 
 ## Configuration
@@ -181,7 +186,7 @@ The plugin registers these tools that agents can call:
 
 The `slackTokenRef` field now declares `format: "secret-ref"`, which is required for Paperclip to collect and resolve secret references at activation time. Previously, the field was a plain `string` with no format annotation, causing plugin activation to fail with `Invalid secret reference`.
 
-**If you installed v2.0.0:** you must re-configure the plugin. Go to **Settings -> Secrets**, create a secret with your Slack Bot OAuth Token, and paste the resulting secret UUID into the `slackTokenRef` field in the plugin configuration. Raw token strings are no longer accepted in this field.
+**If you installed v2.0.0:** you must re-configure the plugin. Create a company secret holding the Slack Bot OAuth Token using one of the paths in the [Setup](#setup) section above (UI or REST API), then paste the resulting secret UUID into the `slackTokenRef` field in the plugin configuration. Raw token strings are no longer accepted in this field.
 
 ## Development
 
