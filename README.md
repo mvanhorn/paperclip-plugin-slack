@@ -128,14 +128,15 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
   -d '{"packageName":"paperclip-plugin-slack"}'
 ```
 
-> **Note — `paperclipai` master, post [#5429](https://github.com/paperclipai/paperclip/pull/5429) (2026-05-09):**
+> [!WARNING]
+> **`paperclipai` master, post [#5429](https://github.com/paperclipai/paperclip/pull/5429) (2026-05-09):**
 > The new Secrets Manager ships with a temporary kill switch on plugin secret-ref UUIDs while a company-scoped `plugin_config` follow-up lands. If you're running paperclipai master, plugin activation will fail with `Plugin secret references are disabled until company-scoped plugin config lands`, and `POST /api/plugins/:id/config` returns HTTP 422 for configs containing secret-ref UUIDs (e.g. `slackTokenRef`). This is intentional fail-closed mitigation (PAP-2394 — see the [upstream plan doc](https://github.com/paperclipai/paperclip/blob/master/doc/plans/2026-04-26-plugin-secret-ref-company-scope.md)). Until the follow-up lands, pin to the last paperclipai release before #5429. This callout will be removed once secret-ref resolution is restored.
 
 ## Setup
 
 1. Create a Slack app at https://api.slack.com/apps
 2. Add the `chat:write` bot scope
-3. Enable **Interactivity** and point the Request URL to your Paperclip host's `slack-interactivity` webhook endpoint
+3. Enable **Interactivity** and point the Request URL to your Paperclip host's `slack-interactivity` webhook endpoint (`<paperclip base URL>/api/plugins/paperclip-plugin-slack/webhooks/slack-interactivity`)
 4. Install the app to your workspace and copy the Bot OAuth Token
 5. In Paperclip, create a **company secret** holding the Bot OAuth Token, by either:
 
