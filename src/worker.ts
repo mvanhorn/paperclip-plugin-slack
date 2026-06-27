@@ -1274,7 +1274,7 @@ const plugin = definePlugin({
 
     slackAdapter = new SlackAdapter(ctx, token);
 
-    ctx.logger.info("Slack Chat OS plugin started (v2.0.0) - all 5 phases active");
+    ctx.logger.info("Slack Chat OS plugin started");
   },
 
   // =========================================================================
