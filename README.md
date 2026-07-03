@@ -39,6 +39,11 @@ This is that plugin.
 - Clicking a button calls the Paperclip API and updates the Slack message inline
 - Identifies which Slack user acted (logged as `slack:{user_id}`)
 
+**Issue-thread confirmations**
+- Posts pending `request_confirmation` issue interactions to Slack with Accept/Reject buttons
+- Clicking a button resolves the interaction in Paperclip and updates the Slack message inline
+- Uses the approvals channel when configured, otherwise falls back to the default channel
+
 **HITL escalation**
 - Agents that get stuck can escalate to a dedicated Slack channel with full conversation context
 - Rich Block Kit formatting with conversation history, agent reasoning, and confidence score
@@ -148,13 +153,17 @@ If the plugin looks broken, first confirm which Paperclip host it's actually tal
    - **REST API:** `POST /api/companies/{companyId}/secrets` with body `{"name": "slack-bot-oauth-token", "value": "<your-bot-oauth-token>", "provider": "local_encrypted"}`. The response contains the secret's UUID.
 
    Copy the resulting secret UUID — you'll paste it into `slackTokenRef` in the next step.
-6. Install the plugin and configure the secret UUID in the `slackTokenRef` field + your default channel ID
+6. For Socket Mode, enable it in the Slack app, create an app-level token with `connections:write`, and store that token as a Paperclip secret.
+7. Install the plugin and configure the Bot token secret UUID in `slackTokenRef`, the app-level token secret UUID in `slackAppTokenRef` when using Socket Mode, and your default channel ID. Leave `slackAppTokenRef` empty to keep webhook mode only.
 
 ## Configuration
 
 | Setting | Description |
 |---------|-------------|
 | `slackTokenRef` | Secret reference for the Slack Bot OAuth token |
+| `slackAppTokenRef` | Optional secret reference for the Slack app-level `xapp-...` token used by Socket Mode |
+| `paperclipApiKeyRef` | Optional secret reference for a Paperclip API key used to resolve issue-thread confirmations |
+| `companyId` | Optional company UUID for local Socket Mode instances where company scope cannot be inferred |
 | `defaultChannelId` | Default Slack channel ID (e.g. `C01ABC2DEF3`) |
 | `approvalsChannelId` | Dedicated channel for approvals (optional) |
 | `errorsChannelId` | Dedicated channel for agent errors (optional) |
@@ -162,6 +171,7 @@ If the plugin looks broken, first confirm which Paperclip host it's actually tal
 | `notifyOnIssueCreated` | Post when issues are created (default: true) |
 | `notifyOnIssueDone` | Post when issues are completed (default: true) |
 | `notifyOnApprovalCreated` | Post when approvals are requested (default: true) |
+| `notifyOnRequestConfirmationCreated` | Post pending issue-thread confirmations (default: true) |
 | `notifyOnAgentError` | Post when agent runs fail (default: true) |
 | `notifyOnAgentConnected` | Post when agents connect/disconnect (default: true) |
 | `notifyOnBudgetThreshold` | Post when agents hit budget limits (default: true) |
@@ -199,13 +209,15 @@ The `slackTokenRef` field now declares `format: "secret-ref"`, which is required
 ## Development
 
 ```bash
-pnpm install
-pnpm typecheck
-pnpm test
-pnpm build
+npm install
+npm run typecheck
+npm test
+npm run build
 ```
 
-97 tests covering notifications, approvals, escalation, session registry, media pipeline, custom commands, proactive suggestions, Block Kit formatting, and slash commands.
+129 tests covering notifications, approvals, escalation, session registry, media pipeline, custom commands, proactive suggestions, Block Kit formatting, Socket Mode, and slash commands.
+
+For full local verification, run `npm run verify`. When `SLACK_APP_TOKEN` is available, run `npm run smoke:socket` to verify that Slack returns a Socket Mode WebSocket URL.
 
 ## Contributing
 

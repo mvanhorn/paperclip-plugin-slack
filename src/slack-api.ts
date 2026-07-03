@@ -17,6 +17,11 @@ const SLACK_API_BASE = "https://slack.com/api";
 const MAX_RETRIES = 3;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503]);
 
+function isExpiredInvocationScopeError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("invocation scope");
+}
+
 async function fetchWithRetry(
   ctx: PluginContext,
   url: string,
@@ -32,7 +37,13 @@ async function fetchWithRetry(
       }
       await new Promise((r) => setTimeout(r, delay));
     }
-    const response = await ctx.http.fetch(url, init);
+    let response: Response;
+    try {
+      response = await ctx.http.fetch(url, init);
+    } catch (err) {
+      if (!isExpiredInvocationScopeError(err)) throw err;
+      response = await fetch(url, init);
+    }
     if (!RETRYABLE_STATUS.has(response.status)) return response;
     lastResponse = response;
     ctx.logger.warn("Retryable HTTP error", { url, status: response.status, attempt });
@@ -125,7 +136,12 @@ export async function respondToAction(
     }),
   });
 
-  const body = await response.json() as { ok: boolean; error?: string };
+  let body: { ok: boolean; error?: string };
+  try {
+    body = await response.json() as { ok: boolean; error?: string };
+  } catch {
+    body = response.ok ? { ok: true } : { ok: false, error: String(response.status) };
+  }
 
   if (!body.ok) {
     ctx.logger.warn("Slack action response error", { error: body.error, responseUrl });

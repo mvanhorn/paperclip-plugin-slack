@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsc --watch",
     "test": "vitest run",
+    "verify": "bash scripts/verify-local.sh",
+    "smoke:socket": "node scripts/smoke-socket-mode.mjs",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
