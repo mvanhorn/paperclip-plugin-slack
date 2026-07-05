@@ -52,12 +52,56 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Secret UUID for your Slack Bot OAuth token. Create the secret in Settings → Secrets, then paste its UUID here.",
         default: DEFAULT_CONFIG.slackTokenRef,
       },
+      slackToken: {
+        type: "string",
+        title: "Slack Bot Token (inline fallback)",
+        description: "Local/backward-compatible fallback for instances that cannot resolve plugin secret refs. Prefer slackTokenRef.",
+        default: DEFAULT_CONFIG.slackToken,
+      },
+      slackAppTokenRef: {
+        type: "string",
+        format: "secret-ref",
+        title: "Slack App-Level Token (secret reference)",
+        description: "Secret UUID for your Slack app-level xapp token with connections:write. Optional; when empty, webhook mode remains active.",
+        default: DEFAULT_CONFIG.slackAppTokenRef,
+      },
+      slackAppToken: {
+        type: "string",
+        title: "Slack App-Level Token (inline fallback)",
+        description: "Local/backward-compatible fallback for Socket Mode when plugin secret refs are unavailable. Prefer slackAppTokenRef.",
+        default: DEFAULT_CONFIG.slackAppToken,
+      },
       slackSigningSecretRef: {
         type: "string",
         format: "secret-ref",
         title: "Slack Signing Secret (secret reference)",
         description: "Secret UUID for your Slack app's Signing Secret. Required to verify that incoming webhooks are genuinely from Slack.",
         default: DEFAULT_CONFIG.slackSigningSecretRef,
+      },
+      slackSigningSecret: {
+        type: "string",
+        title: "Slack Signing Secret (inline fallback)",
+        description: "Local/backward-compatible fallback for webhook signature verification. Prefer slackSigningSecretRef.",
+        default: DEFAULT_CONFIG.slackSigningSecret,
+      },
+      paperclipApiKeyRef: {
+        type: "string",
+        format: "secret-ref",
+        title: "Paperclip API Key (secret reference)",
+        description: "Secret UUID for a Paperclip API key that can resolve issue-thread confirmations from Slack. Optional when PAPERCLIP_API_KEY is available locally.",
+        default: DEFAULT_CONFIG.paperclipApiKeyRef,
+      },
+      paperclipApiKey: {
+        type: "string",
+        title: "Paperclip API Key (inline fallback)",
+        description: "Local/backward-compatible fallback for issue-thread confirmation actions. Prefer PAPERCLIP_API_KEY or paperclipApiKeyRef.",
+        default: DEFAULT_CONFIG.paperclipApiKey,
+      },
+      companyId: {
+        type: "string",
+        title: "Paperclip Company ID",
+        description: "Company UUID to use for Slack inbound commands/events. Set this for local Socket Mode instances where worker invocation scope cannot list companies.",
+        default: DEFAULT_CONFIG.companyId,
       },
       defaultChannelId: {
         type: "string",
@@ -97,6 +141,12 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "boolean",
         title: "Notify on approval requested",
         default: DEFAULT_CONFIG.notifyOnApprovalCreated,
+      },
+      notifyOnRequestConfirmationCreated: {
+        type: "boolean",
+        title: "Notify on issue-thread confirmations",
+        description: "Posts pending request_confirmation cards from Paperclip issue threads to Slack with Accept/Reject buttons.",
+        default: DEFAULT_CONFIG.notifyOnRequestConfirmationCreated,
       },
       notifyOnAgentError: {
         type: "boolean",
@@ -156,7 +206,7 @@ const manifest: PaperclipPluginManifestV1 = {
         default: DEFAULT_CONFIG.maxAgentsPerThread,
       },
     },
-    required: ["slackTokenRef", "slackSigningSecretRef", "defaultChannelId"],
+    required: ["defaultChannelId"],
   },
   jobs: [
     {
@@ -169,6 +219,12 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: "check-escalation-timeouts",
       displayName: "Check Escalation Timeouts",
       description: "Checks for unresolved escalations that have exceeded the configured timeout.",
+      schedule: "*/1 * * * *",
+    },
+    {
+      jobKey: "check-issue-interactions",
+      displayName: "Check Issue Confirmations",
+      description: "Posts pending Paperclip issue-thread confirmations to Slack and updates resolved cards.",
       schedule: "*/1 * * * *",
     },
     {
