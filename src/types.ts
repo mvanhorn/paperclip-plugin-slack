@@ -1,6 +1,13 @@
 export type SlackConfig = {
   slackTokenRef: string;
+  slackToken?: string;
+  slackAppTokenRef: string;
+  slackAppToken?: string;
   slackSigningSecretRef: string;
+  slackSigningSecret?: string;
+  paperclipApiKeyRef: string;
+  paperclipApiKey?: string;
+  companyId?: string;
   defaultChannelId: string;
   approvalsChannelId: string;
   errorsChannelId: string;
@@ -9,6 +16,7 @@ export type SlackConfig = {
   notifyOnIssueCreated: boolean;
   notifyOnIssueDone: boolean;
   notifyOnApprovalCreated: boolean;
+  notifyOnRequestConfirmationCreated: boolean;
   notifyOnAgentError: boolean;
   notifyOnAgentConnected: boolean;
   notifyOnBudgetThreshold: boolean;

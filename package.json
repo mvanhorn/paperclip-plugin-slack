@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsc --watch",
     "test": "vitest run",
+    "verify": "bash scripts/verify-local.sh",
+    "smoke:socket": "node scripts/smoke-socket-mode.mjs",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
@@ -15,8 +17,8 @@
     "@paperclipai/shared": "*"
   },
   "devDependencies": {
-    "@paperclipai/plugin-sdk": "^2026.618.0",
-    "@paperclipai/shared": "^2026.618.0",
+    "@paperclipai/plugin-sdk": "^2026.626.0",
+    "@paperclipai/shared": "^2026.626.0",
     "@types/node": "^25.5.2",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
