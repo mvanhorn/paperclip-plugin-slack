@@ -144,16 +144,29 @@ If the plugin looks broken, first confirm which Paperclip host it's actually tal
 ## Setup
 
 1. Create a Slack app at https://api.slack.com/apps
-2. Add the `chat:write` bot scope
-3. Enable **Interactivity** and point the Request URL to your Paperclip host's `slack-interactivity` webhook endpoint (`<paperclip base URL>/api/plugins/paperclip-plugin-slack/webhooks/slack-interactivity`)
-4. Install the app to your workspace and copy the Bot OAuth Token
-5. In Paperclip, create a **company secret** holding the Bot OAuth Token, by either:
+2. Add the required bot scopes:
+   - `chat:write` for posting notifications and command responses
+   - `commands` for the `/clip` slash command
+   - `files:read` if you want voice/file ingestion
+   - `app_mentions:read` and the relevant message history scopes if you want Slack message events routed to agents
+3. Choose one inbound mode:
+   - **Socket Mode:** enable Socket Mode, create an app-level token with `connections:write`, and store that token as a Paperclip secret. Socket Mode is the easiest local setup because Slack sends events and interactive payloads over the WebSocket instead of requiring a public Request URL.
+   - **Webhook mode:** keep Socket Mode disabled and configure the public Slack URLs below.
+4. For webhook mode, configure these Slack app URLs:
+
+   | Slack setting | Request URL |
+   |---------------|-------------|
+   | Event Subscriptions | `<paperclip base URL>/api/plugins/paperclip-plugin-slack/webhooks/slack-events` |
+   | Slash Commands (`/clip`) | `<paperclip base URL>/api/plugins/paperclip-plugin-slack/webhooks/slash-command` |
+   | Interactivity & Shortcuts | `<paperclip base URL>/api/plugins/paperclip-plugin-slack/webhooks/slack-interactivity` |
+
+5. Install the app to your workspace and copy the Bot OAuth Token
+6. In Paperclip, create a **company secret** holding the Bot OAuth Token, by either:
 
    - **UI:** Open any agent's **Configuration → Environment variables**, enter a name (e.g. `slack-bot-oauth-token`) and the Bot OAuth Token as the value, then click **Create / Seal**. The secret is created at the **company level** (not bound to that agent — despite the agent-context UI) and the returned UUID can be used from any plugin in the company.
    - **REST API:** `POST /api/companies/{companyId}/secrets` with body `{"name": "slack-bot-oauth-token", "value": "<your-bot-oauth-token>", "provider": "local_encrypted"}`. The response contains the secret's UUID.
 
    Copy the resulting secret UUID — you'll paste it into `slackTokenRef` in the next step.
-6. For Socket Mode, enable it in the Slack app, create an app-level token with `connections:write`, and store that token as a Paperclip secret.
 7. Install the plugin and configure the Bot token secret UUID in `slackTokenRef`, the app-level token secret UUID in `slackAppTokenRef` when using Socket Mode, and your default channel ID. Leave `slackAppTokenRef` empty to keep webhook mode only.
 
 ## Configuration
