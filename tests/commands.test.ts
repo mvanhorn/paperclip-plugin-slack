@@ -46,6 +46,26 @@ describe("slash command parsing", () => {
     expect(parts[1]).toBe("apr-123");
   });
 
+  it("parses ask command with agent and question", () => {
+    const raw = "command=%2Fclip&text=ask+hackathon-pm+Should+we+keep+Slack%3F&response_url=https%3A%2F%2Fhooks.slack.com%2Factions";
+    const result = parseSlashCommand(raw);
+    const parts = result.text.trim().split(/\s+/);
+    expect(parts[0]).toBe("ask");
+    expect(parts[1]).toBe("hackathon-pm");
+    expect(parts.slice(2).join(" ")).toBe("Should we keep Slack?");
+  });
+
+  it("parses ask command for an existing issue", () => {
+    const raw = "command=%2Fclip&text=ask+--issue+PC-123+hackathon-pm+What+happened%3F&response_url=https%3A%2F%2Fhooks.slack.com%2Factions";
+    const result = parseSlashCommand(raw);
+    const parts = result.text.trim().split(/\s+/);
+    expect(parts[0]).toBe("ask");
+    expect(parts[1]).toBe("--issue");
+    expect(parts[2]).toBe("PC-123");
+    expect(parts[3]).toBe("hackathon-pm");
+    expect(parts.slice(4).join(" ")).toBe("What happened?");
+  });
+
   it("parses agents command", () => {
     const raw = "command=%2Fclip&text=agents&response_url=https%3A%2F%2Fhooks.slack.com%2Factions";
     const result = parseSlashCommand(raw);

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { respondToAction } from "../src/slack-api.js";
+import { openModal, respondToAction } from "../src/slack-api.js";
 
 function makeCtx(response: Response) {
   return {
@@ -22,5 +22,31 @@ describe("Slack API helpers", () => {
 
     expect(result).toEqual({ ok: true });
     expect(ctx.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("opens Slack modals with trigger id and view payload", async () => {
+    const ctx = makeCtx(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const result = await openModal(ctx as never, "xoxb-test", "trigger-123", {
+      type: "modal",
+      title: { type: "plain_text", text: "Request changes" },
+      blocks: [],
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(ctx.http.fetch).toHaveBeenCalledWith(
+      "https://slack.com/api/views.open",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          trigger_id: "trigger-123",
+          view: {
+            type: "modal",
+            title: { type: "plain_text", text: "Request changes" },
+            blocks: [],
+          },
+        }),
+      }),
+    );
   });
 });
