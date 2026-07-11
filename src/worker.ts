@@ -51,11 +51,13 @@ import {
   checkWatches,
   BUILTIN_WATCH_TEMPLATES,
 } from "./proactive-suggestions.js";
+import { resolveStartupSlackToken, type SlackRuntimeHealth } from "./runtime-token.js";
 
 let pluginCtx: PluginContext;
 let pluginToken: string;
 let pluginConfig: SlackConfig;
 let slackAdapter: SlackAdapter;
+let runtimeHealth: SlackRuntimeHealth = { status: "ok" };
 
 // --- Slack signature verification ---
 
@@ -404,7 +406,13 @@ const plugin = definePlugin({
       return;
     }
 
-    const token = await ctx.secrets.resolve(config.slackTokenRef);
+    const token = await resolveStartupSlackToken(ctx, config.slackTokenRef, (health) => {
+      runtimeHealth = health;
+    });
+    if (!token) {
+      ctx.logger.warn("Slack plugin runtime disabled because Slack token could not be resolved");
+      return;
+    }
     pluginToken = token;
 
     // Resolve Slack signing secret for webhook signature verification
@@ -1488,7 +1496,7 @@ const plugin = definePlugin({
   },
 
   async onHealth(): Promise<PluginHealthDiagnostics> {
-    return { status: "ok" };
+    return runtimeHealth;
   },
 });
 
