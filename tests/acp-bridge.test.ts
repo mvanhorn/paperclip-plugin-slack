@@ -621,6 +621,27 @@ describe("handleAcpSlashCommand", () => {
     );
   });
 
+  it("forwards a non-streaming agent's final response from the done event", async () => {
+    seedSessions(CHANNEL, THREAD, [makeSession()]);
+    ctx.agents.sessions.sendMessage.mockImplementationOnce(
+      async (_sessionId: string, _companyId: string, options: { onEvent?: (event: any) => void }) => {
+        options.onEvent?.({ eventType: "done", message: "Finished response" });
+      },
+    );
+
+    await routeMessageToAgent(ctx, COMPANY, CHANNEL, THREAD, "hello");
+
+    expect(ctx.events.emit).toHaveBeenCalledWith(
+      "plugin.slack.agent-stream-chunk",
+      COMPANY,
+      expect.objectContaining({
+        channel: CHANNEL,
+        threadTs: THREAD,
+        text: "Finished response",
+      }),
+    );
+  });
+
   it("creates a root Slack message when a slash command has no thread timestamp", async () => {
     await handleAcpSlashCommand(ctx, TOKEN, {
       channel: CHANNEL,
