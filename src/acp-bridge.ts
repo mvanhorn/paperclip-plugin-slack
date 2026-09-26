@@ -84,7 +84,10 @@ export async function spawnAgent(
     return existing;
   }
 
-  const taskKey = `slack-${channelId}-${threadTs}`;
+  // Paperclip scopes plugin-owned sessions by this required task-key prefix.
+  // Without it, create() succeeds but sendMessage()/close() deliberately hide
+  // the row and report "Session not found".
+  const taskKey = `plugin:${PLUGIN_ID}:session:slack-${channelId}-${threadTs}`;
   let transport: "native" | "acp" = "acp";
   let sessionId = `acp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -236,9 +239,11 @@ export async function routeMessageToAgent(
       prompt: text,
       reason: `Slack message in ${channel}/${threadTs}`,
       onEvent: (event) => {
-        if (event.eventType === "chunk" && event.message) {
-          // Streaming output handled via event listener
-          ctx.events.emit("plugin.slack.agent-stream-chunk", companyId, {
+        if (event.eventType === "done" && event.message) {
+          // Post only the terminal finalText. Raw adapter chunks can contain
+          // setup logs, JSON envelopes, local paths, or benign stderr that do
+          // not belong in a human conversation.
+          ctx.events.emit("agent-stream-chunk", companyId, {
             agentName: target.agentName,
             agentDisplayName: target.agentDisplayName,
             sessionId: target.sessionId,
@@ -861,13 +866,58 @@ export async function handleAcpSlashCommand(
   const sub = subArgs[0]?.toLowerCase() ?? "";
 
   if (sub === "spawn") {
-    const agentName = subArgs[1];
-    if (!agentName) {
+    const agentRef = subArgs[1];
+    if (!agentRef) {
       ctx.logger.warn("acp spawn requires an agent name");
       return;
     }
-    const displayName = subArgs[2] ?? agentName;
-    const entry = await spawnAgent(ctx, payload.companyId, payload.channel, payload.threadTs, agentName, displayName);
+
+    // Slack does not support slash commands from inside a message thread. When
+    // /clip is invoked at channel level, create a root message first and bind
+    // the Paperclip session to that message's timestamp. Replies then share the
+    // same thread key and can be routed back to the native agent session.
+    let threadTs = payload.threadTs;
+    if (!threadTs) {
+      const root = await postMessage(ctx, token, payload.channel, {
+        text: `Opening a Paperclip conversation with ${subArgs[2] ?? agentRef}`,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `:speech_balloon: Opening a Paperclip conversation with *${subArgs[2] ?? agentRef}*`,
+            },
+          },
+        ],
+      });
+      if (!root.ok || !root.ts) {
+        ctx.logger.warn("Unable to create Slack thread for agent session", {
+          channel: payload.channel,
+          agentRef,
+        });
+        return;
+      }
+      threadTs = root.ts;
+    }
+
+    // Humans naturally type an agent's display name (for example,
+    // "Dispatcher"), while Paperclip's native session API requires the UUID.
+    // Resolve either form here so the command remains human-friendly.
+    const agents = await ctx.agents.list({ companyId: payload.companyId, limit: 100, offset: 0 });
+    const normalizedRef = agentRef.toLowerCase();
+    const agent = agents.find((candidate) =>
+      candidate.id === agentRef || candidate.name.toLowerCase() === normalizedRef
+    );
+    if (!agent) {
+      ctx.logger.warn("No Paperclip agent matches Slack spawn request", { agentRef });
+      await postMessage(ctx, token, payload.channel, {
+        text: `No Paperclip agent named ${agentRef} was found. Use \`/clip agents\` to list agents.`,
+      }, { threadTs });
+      return;
+    }
+
+    const displayName = subArgs[2] ?? agent.name;
+    const entry = await spawnAgent(ctx, payload.companyId, payload.channel, threadTs, agent.id, displayName);
     if (entry) {
       await postMessage(ctx, token, payload.channel, {
         text: `Agent ${displayName} spawned (${entry.transport})`,
@@ -879,7 +929,7 @@ export async function handleAcpSlashCommand(
             ],
           },
         ],
-      }, payload.threadTs ? { threadTs: payload.threadTs } : undefined);
+      }, { threadTs });
     }
     return;
   }

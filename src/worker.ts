@@ -2127,7 +2127,7 @@ const plugin = definePlugin({
     // =========================================================================
 
     // Native agent streaming output
-    ctx.events.on("plugin.slack.agent-stream-chunk", async (event: PluginEvent) => {
+    ctx.events.on("plugin.paperclip-plugin-slack.agent-stream-chunk", async (event: PluginEvent) => {
       const rt = ensureRuntime(event.companyId);
       if (!rt) return;
       const p = event.payload as Record<string, unknown>;
