@@ -610,6 +610,17 @@ describe("handleAcpSlashCommand", () => {
     expect(sessions[0].agentDisplayName).toBe("CodeBot");
   });
 
+  it("uses Paperclip's required plugin-session task key prefix", async () => {
+    await spawnAgent(ctx, COMPANY, CHANNEL, THREAD, "bot-a", "Bot A");
+    expect(ctx.agents.sessions.create).toHaveBeenCalledWith(
+      "bot-a",
+      COMPANY,
+      expect.objectContaining({
+        taskKey: `plugin:paperclip-plugin-slack:session:slack-${CHANNEL}-${THREAD}`,
+      }),
+    );
+  });
+
   it("creates a root Slack message when a slash command has no thread timestamp", async () => {
     await handleAcpSlashCommand(ctx, TOKEN, {
       channel: CHANNEL,
@@ -624,7 +635,9 @@ describe("handleAcpSlashCommand", () => {
     expect(ctx.agents.sessions.create).toHaveBeenCalledWith(
       "agent-1",
       COMPANY,
-      expect.objectContaining({ taskKey: `slack-${CHANNEL}-1234.5678` }),
+      expect.objectContaining({
+        taskKey: `plugin:paperclip-plugin-slack:session:slack-${CHANNEL}-1234.5678`,
+      }),
     );
     expect(ctx.http.fetch).toHaveBeenCalledTimes(2);
   });

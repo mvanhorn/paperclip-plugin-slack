@@ -84,7 +84,10 @@ export async function spawnAgent(
     return existing;
   }
 
-  const taskKey = `slack-${channelId}-${threadTs}`;
+  // Paperclip scopes plugin-owned sessions by this required task-key prefix.
+  // Without it, create() succeeds but sendMessage()/close() deliberately hide
+  // the row and report "Session not found".
+  const taskKey = `plugin:${PLUGIN_ID}:session:slack-${channelId}-${threadTs}`;
   let transport: "native" | "acp" = "acp";
   let sessionId = `acp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
