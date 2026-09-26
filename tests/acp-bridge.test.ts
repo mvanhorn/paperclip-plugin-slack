@@ -589,13 +589,13 @@ describe("handleAcpSlashCommand", () => {
     await handleAcpSlashCommand(ctx, TOKEN, {
       channel: CHANNEL,
       threadTs: THREAD,
-      text: "spawn my-agent MyAgent",
+      text: "spawn CodeBot MyAgent",
       companyId: COMPANY,
     });
     const key = STATE_KEYS.sessionRegistry(CHANNEL, THREAD);
     const sessions = stateStore.get(key) as SessionEntry[];
     expect(sessions).toHaveLength(1);
-    expect(sessions[0].agentName).toBe("my-agent");
+    expect(sessions[0].agentName).toBe("agent-1");
     expect(sessions[0].agentDisplayName).toBe("MyAgent");
   });
 
@@ -603,11 +603,60 @@ describe("handleAcpSlashCommand", () => {
     await handleAcpSlashCommand(ctx, TOKEN, {
       channel: CHANNEL,
       threadTs: THREAD,
-      text: "spawn solo-bot",
+      text: "spawn CodeBot",
       companyId: COMPANY,
     });
     const sessions = stateStore.get(STATE_KEYS.sessionRegistry(CHANNEL, THREAD)) as SessionEntry[];
-    expect(sessions[0].agentDisplayName).toBe("solo-bot");
+    expect(sessions[0].agentDisplayName).toBe("CodeBot");
+  });
+
+  it("creates a root Slack message when a slash command has no thread timestamp", async () => {
+    await handleAcpSlashCommand(ctx, TOKEN, {
+      channel: CHANNEL,
+      threadTs: "",
+      text: "spawn CodeBot",
+      companyId: COMPANY,
+    });
+
+    const sessions = stateStore.get(STATE_KEYS.sessionRegistry(CHANNEL, "1234.5678")) as SessionEntry[];
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].agentName).toBe("agent-1");
+    expect(ctx.agents.sessions.create).toHaveBeenCalledWith(
+      "agent-1",
+      COMPANY,
+      expect.objectContaining({ taskKey: `slack-${CHANNEL}-1234.5678` }),
+    );
+    expect(ctx.http.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts a Paperclip agent id as the spawn reference", async () => {
+    await handleAcpSlashCommand(ctx, TOKEN, {
+      channel: CHANNEL,
+      threadTs: THREAD,
+      text: "spawn agent-1 Dispatcher",
+      companyId: COMPANY,
+    });
+
+    expect(ctx.agents.sessions.create).toHaveBeenCalledWith(
+      "agent-1",
+      COMPANY,
+      expect.any(Object),
+    );
+  });
+
+  it("does not create a session for an unknown agent", async () => {
+    await handleAcpSlashCommand(ctx, TOKEN, {
+      channel: CHANNEL,
+      threadTs: THREAD,
+      text: "spawn MissingBot",
+      companyId: COMPANY,
+    });
+
+    expect(ctx.agents.sessions.create).not.toHaveBeenCalled();
+    expect(ctx.logger.warn).toHaveBeenCalledWith(
+      "No Paperclip agent matches Slack spawn request",
+      { agentRef: "MissingBot" },
+    );
   });
 
   it("warns when spawn has no agent name", async () => {
