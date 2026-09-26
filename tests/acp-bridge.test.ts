@@ -632,7 +632,7 @@ describe("handleAcpSlashCommand", () => {
     await routeMessageToAgent(ctx, COMPANY, CHANNEL, THREAD, "hello");
 
     expect(ctx.events.emit).toHaveBeenCalledWith(
-      "plugin.slack.agent-stream-chunk",
+      "agent-stream-chunk",
       COMPANY,
       expect.objectContaining({
         channel: CHANNEL,

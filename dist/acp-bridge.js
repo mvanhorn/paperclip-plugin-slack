@@ -165,7 +165,7 @@ export async function routeMessageToAgent(ctx, companyId, channel, threadTs, tex
                 if ((event.eventType === "chunk" || event.eventType === "done") && event.message) {
                     // Paperclip adapters are not required to stream text chunks. Always
                     // forward the terminal finalText carried by the done event as well.
-                    ctx.events.emit("plugin.slack.agent-stream-chunk", companyId, {
+                    ctx.events.emit("agent-stream-chunk", companyId, {
                         agentName: target.agentName,
                         agentDisplayName: target.agentDisplayName,
                         sessionId: target.sessionId,
